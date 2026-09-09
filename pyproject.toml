@@ -1,0 +1,16 @@
+[project]
+name = "scrapping-accords"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "pandas>=3.0.5",
+    "playwright>=1.62.0",
+    "pyarrow>=25.0.1",
+    "pylegifrance>=1.7.1",
+    "python-docx>=1.2.0",
+    "python-dotenv>=1.2.3",
+    "requests>=2.34.2",
+    "s3fs>=2026.7.0"
+]
