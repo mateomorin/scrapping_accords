@@ -11,7 +11,7 @@ fs = s3fs.S3FileSystem(
     client_kwargs={"region_name": "us-east-1"},
 )
 
-MAX_RETRIES = 3
+MAX_RETRIES = 5
 
 
 def parse_months(value):
@@ -104,6 +104,12 @@ def multiple_tries(client, payload, pageNumber):
             # Random error
             if "401" in str(e):
                 print(f"Error 401 à la page {pageNumber} (Tentative {attempt + 1}/{MAX_RETRIES})")
+
+                # Stop the process if too many retries
+                if attempt + 1 == MAX_RETRIES:
+                    print("Stopping")
+                    return 401
+
                 time.sleep(2 * (attempt + 1))
             # Probably no more pages, skip
             elif "503" in str(e):
@@ -151,7 +157,7 @@ def search_month(year: int, month: int):
         payload["recherche"]["pageNumber"] = pageNumber
         response = multiple_tries(client, payload, pageNumber)
 
-        if not response or response.status_code != 200:
+        if (not response) or (response == 401) or (response.status_code != 200):
             break
 
         accos = response.json().get("results", [])
