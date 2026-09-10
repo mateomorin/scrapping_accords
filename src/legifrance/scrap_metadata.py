@@ -104,29 +104,21 @@ def multiple_tries(client, payload, pageNumber):
     """
     for attempt in range(MAX_RETRIES):
         response = client.search(payload=payload)
-        match response.status_code:
-            case 200:
+
+        if response.status_code == 200:
+            accos = response.json().get("results", [])
+            if len(accos) == 0:
+                logger.warning(f"No metadata found in response (Trial {attempt + 1}/{MAX_RETRIES})")
+            else:
                 return response
-            case 401:
-                logger.warning(f"Error 401 at page {pageNumber} (Trial {attempt + 1}/{MAX_RETRIES})")
 
-                # Stop the process if too many retries
-                if attempt + 1 == MAX_RETRIES:
-                    logger.warning("Too many trials. Stopping...")
-                    response = 401
-                    break
+        # Unexpected error
+        else:
+            logger.warning(f"Error {response.status_code} at page {pageNumber} (Trial {attempt + 1}/{MAX_RETRIES})")
+            time.sleep(2 * (attempt + 1))
 
-                time.sleep(2 * (attempt + 1))
-            case 503:
-                logger.warning("No more pages (Error 503). Skipping...")
-                response = None
-                break
-            case _:
-                logger.error(f"Unusual error: {response}")
-                response = None
-                break
-
-    return response
+    logger.warning("Too many unsuccessful trials. Stopping...")
+    return None
 
 
 def search_month(year: int, month: int):
@@ -144,7 +136,8 @@ def search_month(year: int, month: int):
                 },
                 "facette": "DATE_SIGNATURE"
             }],
-            "sort": "ID",
+            "sort": "DATE_ASC",
+            "secondSort": "ID",
             "fromAdvancedRecherche": False,
             "pageSize": 100,
             "typePagination": "DEFAUT",
@@ -167,10 +160,12 @@ def search_month(year: int, month: int):
         response = multiple_tries(client, payload, pageNumber)
 
         if response is None:
+            logger.warning("Response is invalid. Exitting...")
             break
 
-        accos = response.json().get("results")
+        accos = response.json().get("results", [])
         if len(accos) == 0:
+            logger.warning("No metadata found in response. Exitting...")
             break
 
         new_data = retrieve_data(accos)
