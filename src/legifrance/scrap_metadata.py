@@ -1,10 +1,16 @@
 import argparse
+import logging
 import time
 
 import numpy as np
 import pandas as pd
-from pylegifrance import LegifranceClient
 import s3fs
+from tqdm import tqdm
+
+from legifrance_api_client import LegiFranceAPIClient
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 fs = s3fs.S3FileSystem(
     endpoint_url="https://minio.lab.sspcloud.fr",
@@ -25,10 +31,10 @@ def parse_months(value):
         months = [int(m.strip()) for m in value.replace(',', ' ').split()]
         for m in months:
             if not 1 <= m <= 12:
-                raise argparse.ArgumentTypeError(f"Le mois {m} doit être compris entre 1 et 12.")
+                raise argparse.ArgumentTypeError(f"Month {m} must be set between 1 and 12.")
         return months
     except ValueError:
-        raise argparse.ArgumentTypeError("Les mois doivent être 'all' ou des entiers séparés par des virgules.")
+        raise argparse.ArgumentTypeError("Months must be 'all' or integers split by commas.")
 
 
 def parse_year(value):
@@ -41,10 +47,10 @@ def parse_year(value):
     try:
         year = int(value)
         if not 2017 <= year <= 2025:
-            raise argparse.ArgumentTypeError("L'année doit être comprise entre 2017 et 2025.")
+            raise argparse.ArgumentTypeError("The year must be set between 2017 and 2025.")
         return year
     except ValueError:
-        raise argparse.ArgumentTypeError("L'année doit être 'all' ou un entier.")
+        raise argparse.ArgumentTypeError("The year must be 'all' are an integer.")
 
 
 def retrieve_data(accos: list):
@@ -56,7 +62,7 @@ def retrieve_data(accos: list):
     for acco in accos:
         title_1 = acco["titles"][0]
         if len(acco["titles"]) > 1:
-            print("Several titles here")
+            logger.warning("Several titles here")
         data_to_keep = {}
         data_to_keep["cid"] = title_1["cid"]
         data_to_keep["id"] = title_1["id"]
@@ -97,28 +103,26 @@ def multiple_tries(client, payload, pageNumber):
     Cannot refresh client for the page because it might reset the order.
     """
     for attempt in range(MAX_RETRIES):
-        try:
-            response = client.call_api("search", data=payload)
-            break
-
-        except Exception as e:
-            # Random error
-            if "401" in str(e):
-                print(f"Error 401 à la page {pageNumber} (Tentative {attempt + 1}/{MAX_RETRIES})")
+        response = client.search(payload=payload)
+        match response.status_code:
+            case 200:
+                return response
+            case 401:
+                logger.warning(f"Error 401 at page {pageNumber} (Trial {attempt + 1}/{MAX_RETRIES})")
 
                 # Stop the process if too many retries
                 if attempt + 1 == MAX_RETRIES:
-                    print("Stopping")
+                    logger.warning("Too many trials. Stopping...")
                     response = 401
                     break
 
                 time.sleep(2 * (attempt + 1))
-            # Probably no more pages, skip
-            elif "503" in str(e):
+            case 503:
+                logger.warning("No more pages (Error 503). Skipping...")
                 response = None
                 break
-            else:
-                print(f"Exception at page {pageNumber}:", e)
+            case _:
+                logger.error(f"Unusual error: {response}")
                 response = None
                 break
 
@@ -126,7 +130,7 @@ def multiple_tries(client, payload, pageNumber):
 
 
 def search_month(year: int, month: int):
-    client = LegifranceClient()
+    client = LegiFranceAPIClient()
     data_accos = []
     pageNumber = 1
     end_day = end_of_month(year, month)
@@ -158,29 +162,26 @@ def search_month(year: int, month: int):
 
     max_pages = int(np.ceil(totalResultNumber/100))
 
-    for pageNumber in range(1, max_pages + 1):
+    for pageNumber in tqdm(range(1, max_pages + 1)):
         payload["recherche"]["pageNumber"] = pageNumber
         response = multiple_tries(client, payload, pageNumber)
 
-        if (not response) or (response == 401) or (response.status_code != 200):
+        if response is None:
             break
 
-        accos = response.json().get("results", [])
-
+        accos = response.json().get("results")
         if len(accos) == 0:
             break
 
         new_data = retrieve_data(accos)
         data_accos += new_data
 
-        pageNumber += 1
-
     # Validation
     if len(data_accos) != totalResultNumber:
-        print("Warning, the displayed number of elements is not the same after scrapping.")
-        print("Length of the scrapped data:", len(data_accos))
-        print("Expected number of elements", totalResultNumber)
-        print(data_accos[-1])
+        logger.warning("The displayed number of elements is not the same after scrapping.")
+        logger.info(f"Length of the scrapped data: {len(data_accos)}")
+        logger.info(f"Expected number of elements {totalResultNumber}")
+        logger.info(f"{data_accos[-1]}")
 
     return data_accos
 
@@ -193,15 +194,15 @@ def save_acco_to_parquet(acco, file_name):
 def scrap_all_acco():
     all_acco = []
 
-    print("=========================== ANNEE 2017 ============================")
+    logger.info("=========================== YEAR 2017 ============================")
     for month in range(9, 13):
-        print(f"------------------------ MOIS {month} ----------------------------")
+        logger.info(f"------------------------ MONTH {month:02d} ----------------------------")
         all_acco += search_month(2017, month)
 
     for year in range(2018, 2026):
-        print(f"=========================== ANNEE {year} ============================")
+        logger.info(f"=========================== YEAR {year} ============================")
         for month in range(1, 13):
-            print(f"------------------------ MOIS {month} ----------------------------")
+            logger.info(f"------------------------ MONTH {month:02d} ----------------------------")
             all_acco += search_month(year, month)
 
     save_acco_to_parquet("acco_metadata_2017_2025_new")
@@ -220,7 +221,7 @@ def scrap_specific_months(year, months):
         filename = f"acco_metadata_{year}_{"_".join(map(str, months))}"
 
     for month in months:
-        print(f"------------------------ {year}/{month} ----------------------------")
+        logger.info(f"------------------------ {year}/{month:02d} ----------------------------")
         acco += search_month(year, month)
 
     save_acco_to_parquet(acco, filename)
@@ -228,42 +229,32 @@ def scrap_specific_months(year, months):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Script de scraping d'hébergements par année et mois."
+        description="Scrapping of ACCO by month and year"
     )
 
     parser.add_argument(
         "--year",
         type=parse_year,
         required=True,
-        help="Année spécifique (2017-2025) ou 'all'"
+        help="Specific year (2017-2025) or 'all'"
     )
 
     parser.add_argument(
         "--month",
         type=parse_months,
         default="all",
-        help="Liste de mois (ex: '1,2,3' ou '1 2 3') ou 'all' (par défaut: 'all')"
+        help="Month list (ex: '1,2,3' ou '1 2 3') or 'all' (default: 'all')"
     )
 
     args = parser.parse_args()
 
     if args.year == "all":
-        print("Lancement du scraping complet (2017-2025)...")
+        logger.info("Start of full scraping (2017-2025)...")
         scrap_all_acco()
     else:
-        print(f"Lancement du scraping pour l'année {args.year}...")
+        logger.info(f"Start of scraping for year {args.year}...")
         scrap_specific_months(args.year, args.month)
 
 
 if __name__ == "__main__":
     main()
-
-# Errors at:
-# 2018: 11 12
-# 2019: 1 2 3 4 5 6 7 9 10 11 12
-# 2020: all
-# 2021: all
-# 2022: 1 2 3 4 5 6 7 10 11 12
-# 2023: all
-# 2024: nothing
-# 2025: nothing
