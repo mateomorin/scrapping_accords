@@ -99,6 +99,7 @@ def multiple_tries(client, payload, pageNumber):
     for attempt in range(MAX_RETRIES):
         try:
             response = client.call_api("search", data=payload)
+            break
 
         except Exception as e:
             # Random error
@@ -108,7 +109,8 @@ def multiple_tries(client, payload, pageNumber):
                 # Stop the process if too many retries
                 if attempt + 1 == MAX_RETRIES:
                     print("Stopping")
-                    return 401
+                    response = 401
+                    break
 
                 time.sleep(2 * (attempt + 1))
             # Probably no more pages, skip
@@ -148,7 +150,10 @@ def search_month(year: int, month: int):
     }
 
     # Retrieve the number of elements to validate at the end
-    response = client.call_api("search", data=payload)
+    response = multiple_tries(client, payload, pageNumber)
+    if (not response) or (response == 401) or (response.status_code != 200):
+        raise Exception("Requests for the number of results were unsuccesful")
+
     totalResultNumber = response.json()['totalResultNumber']
 
     max_pages = int(np.ceil(totalResultNumber/100))
@@ -172,7 +177,7 @@ def search_month(year: int, month: int):
 
     # Validation
     if len(data_accos) != totalResultNumber:
-        print("Warning, the siplayed number of elements is not the same after scrapping.")
+        print("Warning, the displayed number of elements is not the same after scrapping.")
         print("Length of the scrapped data:", len(data_accos))
         print("Expected number of elements", totalResultNumber)
         print(data_accos[-1])
