@@ -1,20 +1,20 @@
 import argparse
+import asyncio
 import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
-import time
 
 import boto3
 from botocore.config import Config
-import numpy as np
 import pandas as pd
 import s3fs
-from tqdm import tqdm
+from tqdm.asyncio import tqdm_asyncio
 
-from legifrance_api_client import LegiFranceAPIClient
+from legifrance_api_async import LegiFranceAPIClient
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 fs = s3fs.S3FileSystem(
     endpoint_url="https://minio.lab.sspcloud.fr",
@@ -33,6 +33,7 @@ boto_client = boto3.client(
 )
 
 MAX_RETRIES = 5
+CONCURRENCY_LIMIT = 10
 METADATA_PATH = "s3://mateomorin/legifrance/metadata/"
 DOCUMENTS_PATH = "s3://mateomorin/legifrance/documents/"
 
@@ -90,8 +91,9 @@ def retrieve_table_url(year, month):
     # Filter year
     existing_year = [table for table in existing_tables if str(year) in table]
 
-    if f"acco_metadata_{year}.parquet" in existing_year:
-        return f"acco_metadata_{year}.parquet"
+    for file_name in existing_year:
+        if f"acco_metadata_{year}.parquet" in file_name:
+            return f"acco_metadata_{year}.parquet"
 
     # Filter month
     existing_month = [table for table in existing_year if f"_{month}" in table]
@@ -114,40 +116,45 @@ def retrieve_ids(year, month):
     return ids
 
 
-def multiple_tries(client, payload):
+async def fetch_with_retry(client, payload, semaphore):
     """
     Usually, 401 errors happen for some filters, so this allows multiple tries.
     Cannot refresh client for the page because it might reset the order.
     """
-    for attempt in range(MAX_RETRIES):
-        response = client.download_acco(payload=payload)
+    async with semaphore:
+        for attempt in range(MAX_RETRIES):
+            response = await client.download_acco(payload=payload)
 
-        if response.status_code == 200:
-            return response
+            if response.status_code == 200:
+                return response.json()["acco"]["data"]
 
-        # Unexpected error
-        else:
-            logger.warning(f"Error {response.status_code} at id {payload['id']} (Trial {attempt + 1}/{MAX_RETRIES})")
-            time.sleep(2 * (attempt + 1))
+            # Unexpected error
+            else:
+                logger.warning(f"Error {response.status_code} at id {payload['id']} (Trial {attempt + 1}/{MAX_RETRIES})")
+                await asyncio.sleep(2 * (attempt + 1))
 
-    logger.warning("Too many unsuccessful trials. Stopping...")
-    return None
+        logger.warning(f"Too many unsuccessful trials for id {payload['id']}. Stopping...")
+        return None
+
+
+async def run_batch(payloads):
+    async with LegiFranceAPIClient() as client:
+        semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
+
+        tasks = [fetch_with_retry(client, payload, semaphore) for payload in payloads]
+
+        results = await tqdm_asyncio.gather(*tasks)
+        return results
 
 
 def consult_month(year: int, month: int):
-    client = LegiFranceAPIClient()
-    docs_acco = []
     ids_to_consult = retrieve_ids(year, month)
 
-    for id in tqdm(ids_to_consult):
-        payload = {"id": id}
-        response = multiple_tries(client, payload)
+    payloads = [{"id": cid} for cid in ids_to_consult]
 
-        if response is None:
-            logger.warning("Response is invalid. Exitting...")
-            break
+    docs = asyncio.run(run_batch(payloads))
 
-        docs_acco.append({id: response.json()["acco"]["data"]})
+    docs_acco = [{"id": cid, "content_b64": doc} for cid, doc in zip(ids_to_consult, docs)]
 
     return docs_acco
 
@@ -208,15 +215,17 @@ def scrap_all_acco():
             logger.info(f"------------------------ MONTH {month:02d} ----------------------------")
             documents = consult_month(year, month)
             context_vars["month"] = f"{month:02d}"
+            logger.info("Exportation...")
             upload_batch_to_s3(documents=documents)
 
 
 def scrap_specific_months(year, months):
-
+    context_vars["year"] = year
     for month in months:
         logger.info(f"------------------------ {year}/{month:02d} ----------------------------")
         documents = consult_month(year, month)
         context_vars["month"] = f"{month:02d}"
+        logger.info("Exportation...")
         upload_batch_to_s3(documents=documents)
 
 
@@ -247,6 +256,7 @@ def main():
     else:
         logger.info(f"Start of scraping for year {args.year}...")
         scrap_specific_months(args.year, args.month)
+
 
 if __name__ == "__main__":
     main()
