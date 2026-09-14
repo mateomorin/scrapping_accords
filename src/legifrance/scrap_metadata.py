@@ -18,6 +18,7 @@ fs = s3fs.S3FileSystem(
 )
 
 MAX_RETRIES = 5
+METADATA_PATH = "s3://mateomorin/legifrance/metadata/"
 
 
 def parse_months(value):
@@ -121,6 +122,31 @@ def multiple_tries(client, payload, pageNumber):
     return None
 
 
+def check_data_length(data_accos, theoretical_length):
+    """
+    Check for data length and for data id uniqueness.
+    """
+
+    # Validation
+    if len(data_accos) != theoretical_length:
+        logger.warning("The displayed number of elements is not the same after scrapping.")
+        logger.info(f"Length of the scrapped data: {len(data_accos)}")
+        logger.info(f"Expected number of elements {theoretical_length}")
+        logger.info(f"{data_accos[-1]}")
+
+        return False
+
+    ids = [data["cid"] for data in data_accos]
+
+    if len(set(ids)) != len(ids):
+        logger.warning("The data that has been retrieved contains duplicates.")
+        logger.info(f"Unique cids : {len(set(ids))}")
+        logger.info(f"Length of the data : {len(ids)}")
+        return False
+
+    return True
+
+
 def search_month(year: int, month: int):
     client = LegiFranceAPIClient()
     data_accos = []
@@ -137,7 +163,7 @@ def search_month(year: int, month: int):
                 "facette": "DATE_SIGNATURE"
             }],
             "sort": "DATE_ASC",
-            "secondSort": "ID",
+            "secondSort": "ID_ASC",
             "fromAdvancedRecherche": False,
             "pageSize": 100,
             "typePagination": "DEFAUT",
@@ -171,19 +197,14 @@ def search_month(year: int, month: int):
         new_data = retrieve_data(accos)
         data_accos += new_data
 
-    # Validation
-    if len(data_accos) != totalResultNumber:
-        logger.warning("The displayed number of elements is not the same after scrapping.")
-        logger.info(f"Length of the scrapped data: {len(data_accos)}")
-        logger.info(f"Expected number of elements {totalResultNumber}")
-        logger.info(f"{data_accos[-1]}")
+    check_data_length(data_accos=data_accos, theoretical_length=totalResultNumber)
 
     return data_accos
 
 
 def save_acco_to_parquet(acco, file_name):
     df_acco = pd.DataFrame(acco)
-    df_acco.to_parquet(f"s3://mateomorin/legifrance/{file_name}.parquet", filesystem=fs)
+    df_acco.to_parquet(f"{METADATA_PATH}{file_name}.parquet", filesystem=fs)
 
 
 def scrap_all_acco():
@@ -200,7 +221,7 @@ def scrap_all_acco():
             logger.info(f"------------------------ MONTH {month:02d} ----------------------------")
             all_acco += search_month(year, month)
 
-    save_acco_to_parquet("acco_metadata_2017_2025_new")
+    save_acco_to_parquet("acco_metadata_2017_2025")
 
     return all_acco
 
