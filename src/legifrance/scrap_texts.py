@@ -220,6 +220,10 @@ def scrap_all_acco():
 
 
 def scrap_specific_months(year, months):
+    if months == "all":
+        months = range(1, 13)
+    else:
+        assert isinstance(months, list)
     context_vars["year"] = year
     for month in months:
         logger.info(f"------------------------ {year}/{month:02d} ----------------------------")
