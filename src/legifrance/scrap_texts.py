@@ -6,20 +6,17 @@ import logging
 
 import boto3
 from botocore.config import Config
+import httpx
 import pandas as pd
-import s3fs
 from tqdm.asyncio import tqdm_asyncio
 
-from legifrance_api_async import LegiFranceAPIClient
+import config
+from legifrance_api_client import AsyncLegiFranceClient
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-fs = s3fs.S3FileSystem(
-    endpoint_url="https://minio.lab.sspcloud.fr",
-    client_kwargs={"region_name": "us-east-1"},
-)
 
 boto3_config = Config(
         max_pool_connections=50,
@@ -31,11 +28,6 @@ boto_client = boto3.client(
     region_name="us-east-1",
     config=boto3_config
 )
-
-MAX_RETRIES = 5
-CONCURRENCY_LIMIT = 10
-METADATA_PATH = "s3://mateomorin/legifrance/metadata/"
-DOCUMENTS_PATH = "s3://mateomorin/legifrance/documents/"
 
 # Change year/month before running exports
 context_vars = {
@@ -70,20 +62,18 @@ def parse_year(value):
 
     try:
         year = int(value)
-        if not 2017 <= year <= 2025:
-            raise argparse.ArgumentTypeError("The year must be set between 2017 and 2025.")
         return year
     except ValueError:
         raise argparse.ArgumentTypeError("The year must be 'all' are an integer.")
 
 
-def retrieve_table_url(year, month):
+def retrieve_table_url(year: int, month: int):
     """
     Either the file is in format 'acco_metadata_YYYY.parquet' if it contains every month of the year.
     Or it is in format 'acco_metadata_YYYY_MM_MM_MM.parquet', each 'MM' standing for a particular month.
     'MM' can also be 'M' if the month is < 10.
     """
-    existing_files = fs.ls(METADATA_PATH)
+    existing_files = config.fs.ls(config.METADATA_PATH)
 
     # Filter .parquet
     existing_tables = [file for file in existing_files if file.endswith(".parquet")]
@@ -104,83 +94,134 @@ def retrieve_table_url(year, month):
     logger.error(f"No table found corresponding to the month {year}/{month:02d}")
 
 
-def retrieve_ids(year, month):
-    path_to_table = METADATA_PATH + retrieve_table_url(year, month)
+def retrieve_ids(year: int, month: int):
+    """
+    Retrieve all ids from metadata corresponding to a specific month in the year.
+    """
+    # Find url
+    path_to_table = config.METADATA_PATH + retrieve_table_url(year, month)
 
-    df_table = pd.read_parquet(path_to_table, filesystem=fs)
-
+    # Treat data 
+    df_table = pd.read_parquet(path_to_table, filesystem=config.fs)
     df_table["dateSignature"] = pd.to_datetime(df_table["dateSignature"])
 
-    ids = df_table[df_table["dateSignature"].dt.month == 11]["cid"].to_list()
-
+    # Fetch ids
+    ids = df_table[df_table["dateSignature"].dt.month == month]["cid"].to_list()
     return ids
 
 
-async def fetch_with_retry(client, payload, semaphore):
+async def download_doc_with_retry(client, payload, semaphore):
     """
-    Usually, 401 errors happen for some filters, so this allows multiple tries.
-    Cannot refresh client for the page because it might reset the order.
+    Trying to download an acco for a specific payload, with retries.
+    401 errors often happen for some filters, so this allows multiple tries.
+    Waiting time grows exponentially with each retry.
     """
     async with semaphore:
-        for attempt in range(MAX_RETRIES):
-            response = await client.download_acco(payload=payload)
+        status_code_errors = 0
+        request_errors = 0
+        for attempt in range(config.MAX_RETRIES):
+            # In case of httpx errors
+            try:
+                response = await client.download_acco(payload=payload)
 
-            if response.status_code == 200:
-                return response.json()["acco"]["data"]
+                # In case of unexpected status code
+                if response.status_code == 200:
+                    return response.json()["acco"]["data"], attempt, status_code_errors, request_errors
+                else:
+                    status_code_errors += 1
+                    await asyncio.sleep(2 * (attempt + 1))
 
-            # Unexpected error
-            else:
-                logger.warning(f"Error {response.status_code} at id {payload['id']} (Trial {attempt + 1}/{MAX_RETRIES})")
+            except httpx.RequestError:
+                request_errors += 1
                 await asyncio.sleep(2 * (attempt + 1))
 
         logger.warning(f"Too many unsuccessful trials for id {payload['id']}. Stopping...")
-        return None
+        return None, attempt, status_code_errors, request_errors
 
 
-async def run_batch(payloads):
-    async with LegiFranceAPIClient() as client:
-        semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
-
-        tasks = [fetch_with_retry(client, payload, semaphore) for payload in payloads]
-
+async def download_docs_by_batch(payloads):
+    """
+    Use a semaphore to send several requests in parallel and shorten runtime.
+    """
+    async with AsyncLegiFranceClient() as client:
+        semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY)
+        tasks = [download_doc_with_retry(client, payload, semaphore) for payload in payloads]
         results = await tqdm_asyncio.gather(*tasks)
-        return results
+
+        # Show stats
+        total_missed_attempts = 0
+        total_status_code_errors = 0
+        total_request_errors = 0
+        data_list = []
+
+        for res in results:
+            data, attempt, status_errors, req_errors = res
+
+            if data is not None:
+                data_list.append(data)
+
+            total_missed_attempts += attempt
+            total_status_code_errors += status_errors
+            total_request_errors += req_errors
+
+        logger.info(
+            f"Total missed attempts : {total_missed_attempts} | "
+            f"Total HTTP status errors : {total_status_code_errors} | "
+            f"Total httpx request errors : {total_request_errors}"
+        )
+
+        return data_list
 
 
-def consult_month(year: int, month: int):
+def download_doc_by_month(year: int, month: int):
+    """
+    Use legifrance consult API to retrieve all documents for a specific month in the year.
+    """
+    # Prepare payloads to call API consult/acco/
     ids_to_consult = retrieve_ids(year, month)
-
     payloads = [{"id": cid} for cid in ids_to_consult]
 
-    docs = asyncio.run(run_batch(payloads))
-
+    # Download and treat data
+    docs = asyncio.run(download_docs_by_batch(payloads))
     docs_acco = [{"id": cid, "content_b64": doc} for cid, doc in zip(ids_to_consult, docs)]
 
     return docs_acco
 
 
 def upload_single_document(item):
+    """
+    Upload a document to s3 in format docx.
+    The item should contain keys:
+        - id: cid of the document (unique)
+        - content_b64: binary data of the document in format base64
+    """
     doc_id = item['id']
     content_b64 = item['content_b64']
 
     try:
+        # Decode
         binary_data = base64.b64decode(content_b64)
 
+        # Data upload
+        split_path = config.DOCUMENTS_PATH.split("/")
+        bucket_name = split_path[2]
+        directory = "/".join(split_path[3:])
         boto_client.put_object(
-            Bucket="mateomorin",
-            Key=f"legifrance/documents/{context_vars['year']}/{context_vars['month']}/{doc_id}.docx",
+            Bucket=bucket_name,
+            Key=f"{directory}{context_vars['year']}/{context_vars['month']}/{doc_id}.docx",
             Body=binary_data,
             ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         )
         return doc_id, True, None
 
     except Exception as e:
+        logger.info(f"Document {doc_id} has not be exported due to unexpected error.")
         return doc_id, False, str(e)
 
 
 def upload_batch_to_s3(documents, max_workers=30):
     """
-    For massive export to S3.
+    For fast massive export to S3.
     """
     results = {"success": 0, "failed": 0, "errors": []}
 
@@ -195,16 +236,23 @@ def upload_batch_to_s3(documents, max_workers=30):
                 results["failed"] += 1
                 results["errors"].append((doc_id, err))
 
-    return results
+    logger.info(f"{results['success']} documents uploaded! | "
+                f"{results['failed']} fails")
+
+    if results['failed'] >= 1:
+        logger.info(f"Errors: \n{'\n'.join(results['errors'])}")
 
 
 def scrap_all_acco():
+    """
+    Scrap all ACCO documents from 2017/09/01 (ACCO creation) to 2025/12/31.
+    """
 
     logger.info("=========================== YEAR 2017 ============================")
     context_vars["year"] = 2017
     for month in range(9, 13):
         logger.info(f"------------------------ MONTH {month:02d} ----------------------------")
-        documents = consult_month(2017, month)
+        documents = download_doc_by_month(2017, month)
         context_vars["month"] = f"{month:02d}"
         upload_batch_to_s3(documents=documents)
 
@@ -213,21 +261,22 @@ def scrap_all_acco():
         context_vars["year"] = year
         for month in range(1, 13):
             logger.info(f"------------------------ MONTH {month:02d} ----------------------------")
-            documents = consult_month(year, month)
+            documents = download_doc_by_month(year, month)
             context_vars["month"] = f"{month:02d}"
             logger.info("Exportation...")
             upload_batch_to_s3(documents=documents)
 
 
 def scrap_specific_months(year, months):
+    """
+    Scrap ACCO documents for specific/all month(s) in a specific year.
+    """
     if months == "all":
         months = range(1, 13)
-    else:
-        assert isinstance(months, list)
     context_vars["year"] = year
     for month in months:
         logger.info(f"------------------------ {year}/{month:02d} ----------------------------")
-        documents = consult_month(year, month)
+        documents = download_doc_by_month(year, month)
         context_vars["month"] = f"{month:02d}"
         logger.info("Exportation...")
         upload_batch_to_s3(documents=documents)
@@ -242,7 +291,7 @@ def main():
         "--year",
         type=parse_year,
         required=True,
-        help="Specific year (2017-2025) or 'all'"
+        help="Specific year or 'all'"
     )
 
     parser.add_argument(

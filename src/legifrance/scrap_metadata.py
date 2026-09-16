@@ -2,23 +2,17 @@ import argparse
 import logging
 import time
 
+import httpx
 import numpy as np
 import pandas as pd
-import s3fs
 from tqdm import tqdm
 
-from legifrance_api_client import LegiFranceAPIClient
+import config
+from legifrance_api_client import LegiFranceClient
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
-fs = s3fs.S3FileSystem(
-    endpoint_url="https://minio.lab.sspcloud.fr",
-    client_kwargs={"region_name": "us-east-1"},
-)
-
-MAX_RETRIES = 5
-METADATA_PATH = "s3://mateomorin/legifrance/metadata/"
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def parse_months(value):
@@ -40,15 +34,13 @@ def parse_months(value):
 
 def parse_year(value):
     """
-    Convert the argument --year to "all" or to an int between 2017 and 2025.
+    Convert the argument --year to "all" or to an int.
     """
     if value.lower() == "all":
         return "all"
 
     try:
         year = int(value)
-        if not 2017 <= year <= 2025:
-            raise argparse.ArgumentTypeError("The year must be set between 2017 and 2025.")
         return year
     except ValueError:
         raise argparse.ArgumentTypeError("The year must be 'all' are an integer.")
@@ -58,28 +50,28 @@ def retrieve_data(accos: list):
     """
     Extracts the useful information from the dict 'results' of the json.
     """
-    data_accos = []
+    metadata_accos = []
 
     for acco in accos:
         title_1 = acco["titles"][0]
         if len(acco["titles"]) > 1:
-            logger.warning("Several titles here")
-        data_to_keep = {}
-        data_to_keep["cid"] = title_1["cid"]
-        data_to_keep["id"] = title_1["id"]
-        data_to_keep["title"] = title_1["title"]
-        data_to_keep["legalStatus"] = title_1["legalStatus"]
-        data_to_keep["startDate"] = title_1["startDate"]
-        data_to_keep["endDate"] = title_1["endDate"]
-        data_to_keep["nature"] = title_1["nature"]
-        data_to_keep["dateSignature"] = acco["dateSignature"]
-        data_to_keep["dateDiffusion"] = acco["dateDiffusion"]
-        data_to_keep["conforme"] = acco["conforme"]
+            logger.warning("Several titles have been detected for a single page call.")
+        metadata_to_keep = {}
+        metadata_to_keep["cid"] = title_1["cid"]
+        metadata_to_keep["id"] = title_1["id"]
+        metadata_to_keep["title"] = title_1["title"]
+        metadata_to_keep["legalStatus"] = title_1["legalStatus"]
+        metadata_to_keep["startDate"] = title_1["startDate"]
+        metadata_to_keep["endDate"] = title_1["endDate"]
+        metadata_to_keep["nature"] = title_1["nature"]
+        metadata_to_keep["dateSignature"] = acco["dateSignature"]
+        metadata_to_keep["dateDiffusion"] = acco["dateDiffusion"]
+        metadata_to_keep["conforme"] = acco["conforme"]
         for i, theme in enumerate(acco["themes"]):
-            data_to_keep[f"theme_{i+1}"] = theme
-        data_accos.append(data_to_keep)
+            metadata_to_keep[f"theme_{i+1}"] = theme
+        metadata_accos.append(metadata_to_keep)
 
-    return data_accos
+    return metadata_accos
 
 
 def end_of_month(year: int, month: int):
@@ -98,45 +90,49 @@ def end_of_month(year: int, month: int):
             return 28
 
 
-def multiple_tries(client, payload, pageNumber):
+def download_metadata_with_retry(client, payload, pageNumber):
     """
-    Usually, 401 errors happen for some filters, so this allows multiple tries.
-    Cannot refresh client for the page because it might reset the order.
+    Trying to download metadata for a specific payload, with retries.
+    401 errors often happen for some filters, so this allows multiple tries.
+    Waiting time grows exponentially with each retry.
     """
-    for attempt in range(MAX_RETRIES):
-        response = client.search(payload=payload)
+    status_code_errors = 0
+    request_errors = 0
+    for attempt in range(config.MAX_RETRIES):
+        # In case of httpx errors
+        try:
+            response = client.search(payload=payload)
 
-        if response.status_code == 200:
-            accos = response.json().get("results", [])
-            if len(accos) == 0:
-                logger.warning(f"No metadata found in response (Trial {attempt + 1}/{MAX_RETRIES})")
+            # In case of unexpected status code
+            if response.status_code == 200:
+                return response, attempt, status_code_errors, request_errors
             else:
-                return response
+                status_code_errors += 1
+                time.sleep(2 * (attempt + 1))
 
-        # Unexpected error
-        else:
-            logger.warning(f"Error {response.status_code} at page {pageNumber} (Trial {attempt + 1}/{MAX_RETRIES})")
+        except httpx.RequestError:
+            request_errors += 1
             time.sleep(2 * (attempt + 1))
 
-    logger.warning("Too many unsuccessful trials. Stopping...")
-    return None
+    logger.warning(f"Too many unsuccessful trials at page {pageNumber}. Stopping...")
+    return None, attempt, status_code_errors, request_errors
 
 
-def check_data_length(data_accos, theoretical_length):
+def check_data_length(metadata_list, theoretical_length):
     """
     Check for data length and for data id uniqueness.
     """
 
     # Validation
-    if len(data_accos) != theoretical_length:
+    if len(metadata_list) != theoretical_length:
         logger.warning("The displayed number of elements is not the same after scrapping.")
-        logger.info(f"Length of the scrapped data: {len(data_accos)}")
+        logger.info(f"Length of the scrapped data: {len(metadata_list)}")
         logger.info(f"Expected number of elements {theoretical_length}")
-        logger.info(f"{data_accos[-1]}")
+        logger.info(f"{metadata_list[-1]}")
 
         return False
 
-    ids = [data["cid"] for data in data_accos]
+    ids = [data["cid"] for data in metadata_list]
 
     if len(set(ids)) != len(ids):
         logger.warning("The data that has been retrieved contains duplicates.")
@@ -147,21 +143,35 @@ def check_data_length(data_accos, theoretical_length):
     return True
 
 
-def search_month(year: int, month: int):
-    client = LegiFranceAPIClient()
-    data_accos = []
-    pageNumber = 1
+def create_sign_date_filter(year, month):
+    """
+    Create simple sign date filters for payloads.
+    """
     end_day = end_of_month(year, month)
 
+    sign_date_filter = [
+        {
+            "dates": {
+                "start": f"{year:04d}-{month:02d}-01",
+                "end": f"{year:04d}-{month:02d}-{end_day:02d}"
+            },
+            "facette": "DATE_SIGNATURE"
+        }
+    ]
+
+    return sign_date_filter
+
+
+def download_metadata_filtered(filters: list):
+    """
+    Download all metadata respecting filters.
+    """
+    client = LegiFranceClient()
+
+    # Payload for search/
     payload = {
         "recherche": {
-            "filtres": [{
-                "dates": {
-                    "start": f"{year:04d}-{month:02d}-01",
-                    "end": f"{year:04d}-{month:02d}-{end_day:02d}"
-                },
-                "facette": "DATE_SIGNATURE"
-            }],
+            "filtres": filters,
             "sort": "DATE_ASC",
             "secondSort": "ID_ASC",
             "fromAdvancedRecherche": False,
@@ -172,62 +182,85 @@ def search_month(year: int, month: int):
         "fond": "ACCO"
     }
 
-    # Retrieve the number of elements to validate at the end
-    response = multiple_tries(client, payload, pageNumber)
-    if (not response) or (response == 401) or (response.status_code != 200):
+    # Retrieve the number of elements to validate at the end and compute max pages
+    response = download_metadata_with_retry(client, payload, 1)[0]
+    if not response:
         raise Exception("Requests for the number of results were unsuccesful")
-
     totalResultNumber = response.json()['totalResultNumber']
-
     max_pages = int(np.ceil(totalResultNumber/100))
 
+    total_missed_attempts = 0
+    total_status_code_errors = 0
+    total_request_errors = 0
+    metadata_list = []
+
+    # Iterate through pages
     for pageNumber in tqdm(range(1, max_pages + 1)):
+
+        # Request a specific page
         payload["recherche"]["pageNumber"] = pageNumber
-        response = multiple_tries(client, payload, pageNumber)
+        response, attempt, status_errors, req_errors = download_metadata_with_retry(client, payload, pageNumber)
+        metadata = response.json().get("results", [])
 
-        if response is None:
-            logger.warning("Response is invalid. Exitting...")
-            break
+        # Update stats
+        total_missed_attempts += attempt
+        total_status_code_errors += status_errors
+        total_request_errors += req_errors
 
-        accos = response.json().get("results", [])
-        if len(accos) == 0:
-            logger.warning("No metadata found in response. Exitting...")
-            break
+        # If too many unsuccesful tries or missing data, skip
+        if metadata is None:
+            logger.warning(f"Response is invalid for page {pageNumber}. Skipping...")
+            continue
+        if len(metadata) == 0:
+            logger.warning(f"No metadata found at page {pageNumber}. Skipping...")
+            continue
 
-        new_data = retrieve_data(accos)
-        data_accos += new_data
+        new_data = retrieve_data(metadata)
+        metadata_list += new_data
 
-    check_data_length(data_accos=data_accos, theoretical_length=totalResultNumber)
+    check_data_length(metadata_list=metadata_list, theoretical_length=totalResultNumber)
 
-    return data_accos
+    return metadata_list
 
 
-def save_acco_to_parquet(acco, file_name):
-    df_acco = pd.DataFrame(acco)
-    df_acco.to_parquet(f"{METADATA_PATH}{file_name}.parquet", filesystem=fs)
+def save_metadata_to_parquet(metadata, file_name):
+    """
+    Save metadata to parquet.
+    """
+    df_metadata = pd.DataFrame(metadata)
+    df_metadata.to_parquet(f"{config.METADATA_PATH}{file_name}.parquet", filesystem=config.fs)
 
 
 def scrap_all_acco():
-    all_acco = []
+    """
+    Scrap all ACCO metadata from 2017/09/01 (ACCO creation) to 2025/12/31.
+    Be careful, the save only arrives at the end, a simple error might make you lose all data.
+    """
+    all_acco_metadata = []
 
     logger.info("=========================== YEAR 2017 ============================")
     for month in range(9, 13):
         logger.info(f"------------------------ MONTH {month:02d} ----------------------------")
-        all_acco += search_month(2017, month)
+        sign_date_filter = create_sign_date_filter(2017, month)
+        all_acco_metadata += download_metadata_filtered(sign_date_filter)
 
     for year in range(2018, 2026):
         logger.info(f"=========================== YEAR {year} ============================")
         for month in range(1, 13):
             logger.info(f"------------------------ MONTH {month:02d} ----------------------------")
-            all_acco += search_month(year, month)
+            sign_date_filter = create_sign_date_filter(year, month)
+            all_acco_metadata += download_metadata_filtered(sign_date_filter)
 
-    save_acco_to_parquet("acco_metadata_2017_2025")
+    save_metadata_to_parquet(all_acco_metadata, "acco_metadata_2017_2025")
 
-    return all_acco
+    return all_acco_metadata
 
 
 def scrap_specific_months(year, months):
-    acco = []
+    """
+    Scrap ACCO metadata for specific/all month(s) in a specific year.
+    """
+    acco_metadata = []
 
     if months == "all":
         months = range(1, 13)
@@ -238,9 +271,10 @@ def scrap_specific_months(year, months):
 
     for month in months:
         logger.info(f"------------------------ {year}/{month:02d} ----------------------------")
-        acco += search_month(year, month)
+        sign_date_filter = create_sign_date_filter(year, month)
+        acco_metadata += download_metadata_filtered(sign_date_filter)
 
-    save_acco_to_parquet(acco, filename)
+    save_metadata_to_parquet(acco_metadata, filename)
 
 
 def main():
@@ -252,7 +286,7 @@ def main():
         "--year",
         type=parse_year,
         required=True,
-        help="Specific year (2017-2025) or 'all'"
+        help="Specific year or 'all'"
     )
 
     parser.add_argument(
