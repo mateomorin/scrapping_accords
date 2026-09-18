@@ -64,6 +64,7 @@ def retrieve_data(accos: list):
         metadata_to_keep["startDate"] = title_1["startDate"]
         metadata_to_keep["endDate"] = title_1["endDate"]
         metadata_to_keep["nature"] = title_1["nature"]
+        metadata_to_keep["reference"] = acco["reference"]
         metadata_to_keep["dateSignature"] = acco["dateSignature"]
         metadata_to_keep["dateDiffusion"] = acco["dateDiffusion"]
         metadata_to_keep["conforme"] = acco["conforme"]
@@ -200,7 +201,6 @@ def download_metadata_filtered(filters: list):
         # Request a specific page
         payload["recherche"]["pageNumber"] = pageNumber
         response, attempt, status_errors, req_errors = download_metadata_with_retry(client, payload, pageNumber)
-        metadata = response.json().get("results", [])
 
         # Update stats
         total_missed_attempts += attempt
@@ -208,9 +208,11 @@ def download_metadata_filtered(filters: list):
         total_request_errors += req_errors
 
         # If too many unsuccesful tries or missing data, skip
-        if metadata is None:
+        if response is None:
             logger.warning(f"Response is invalid for page {pageNumber}. Skipping...")
             continue
+
+        metadata = response.json().get("results", [])
         if len(metadata) == 0:
             logger.warning(f"No metadata found at page {pageNumber}. Skipping...")
             continue
@@ -218,6 +220,11 @@ def download_metadata_filtered(filters: list):
         new_data = retrieve_data(metadata)
         metadata_list += new_data
 
+    logger.info(
+        f"Total missed attempts : {total_missed_attempts} | "
+        f"Total HTTP status errors : {total_status_code_errors} | "
+        f"Total httpx request errors : {total_request_errors}"
+    )
     check_data_length(metadata_list=metadata_list, theoretical_length=totalResultNumber)
 
     return metadata_list
