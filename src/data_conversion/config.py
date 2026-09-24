@@ -33,3 +33,4 @@ fs = s3fs.S3FileSystem(
 # Storage
 METADATA_PATH = "s3://mateomorin/legifrance/metadata/"
 DOCUMENTS_PATH = "s3://mateomorin/legifrance/documents/"
+FULL_DATA_PATH = "s3://mateomorin/legifrance/data/"
