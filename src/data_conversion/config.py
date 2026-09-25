@@ -66,7 +66,7 @@ engine_options = ApiVlmEngineOptions(
         "temperature": 0.0,
     },
     timeout=120,
-    concurrency=10
+    concurrency=5
 )
 
 vlm_options = VlmConvertOptions.from_preset(
@@ -89,7 +89,7 @@ docling_llm_converter = DocumentConverter(
 )
 
 # Async
-MAX_CONCURRENCY_DOC = 20
+MAX_CONCURRENCY_DOC = 5
 
 # --- Sharding / checkpointing ---
 # Nombre de documents traités par "shard" : c'est à la fois la fréquence de
