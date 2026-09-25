@@ -50,26 +50,18 @@ spec:
           duration: "30s"
           factor: "2"
       script:
-        # Image de base CPU (comme dans l'exemple de training). Elle ne
-        # contient a priori pas LibreOffice : on l'installe au démarrage du
-        # script ci-dessous. Pour un lancement plus rapide sur 9 pods, il est
-        # préférable de construire une image dédiée qui embarque déjà
-        # LibreOffice + les dépendances Python (docling, markitdown, s3fs, uv).
-        image: "inseefrlab/onyxia-vscode-python:py3.13.5"
+        image: "mateomorin/legifrance-transform:latest"
         imagePullPolicy: Always
         command: ["/bin/bash"]
         source: |
           set -e
-
-          echo "Installation de LibreOffice (nécessaire pour la conversion docx -> pdf)..."
-          apt-get update -qq && apt-get install -y --no-install-recommends libreoffice > /dev/null
 
           # Remplacer par l'URL du dépôt contenant transform_docx_to_md.py et config.py
           git clone -b main https://github.com/mateomorin/scrapping_accords.git
           cd scrapping_accords
 
           echo "Lancement de la transformation pour {{inputs.parameters.metadata_name}}..."
-          uv run python transform_docx_to_md.py \
+          uv run python src/data_conversion/transform_docx_to_md.py \
             --metadata_name {{inputs.parameters.metadata_name}} \
             --output_name {{inputs.parameters.output_name}}
         resources:
