@@ -3,14 +3,21 @@ Provided a metadata database, fetch all documents linked to it and apply a dox t
 If a docx document contains images, convert it to pdf and use LLM-based OCR. 
 """
 import argparse
+import logging
+import os
+import subprocess
 import tempfile
+import zipfile
 
-import docx
-import docx2pdf
 import pandas as pd
 from tqdm import tqdm
+import xml.etree.ElementTree as ET
 
 import config
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+logging.getLogger("httpx2").setLevel(logging.WARNING)
 
 
 def fetch_metadata(metadata_name: str):
@@ -40,31 +47,67 @@ def build_doc_paths(metadata: pd.DataFrame):
     return metadata["docx_path"].to_list()
 
 
-def count_images(doc_path: str):
-    with config.fs.open(doc_path, "rb") as f:
-        doc = docx.Document(f)
-        count = 0
-        for par in doc.paragraphs:
-            if 'graphicData' in par._p.xml or 'imagedata' in par._p.xml:
-                count += 1
+def docx_body_has_images_fast(doc_path: str) -> bool:
+    """
+    Made by Gemini to extract only images from docx body (zipfile is more stable than python-docx)
+    """
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        local_docx = os.path.join(tmp_dir, "temp_doc.docx")
+        config.fs.get(doc_path, local_docx)
+        with zipfile.ZipFile(local_docx, "r") as z:
+            namelist = z.namelist()
 
-    return count
+            rels_path = "word/_rels/document.xml.rels"
+            docx_path = "word/document.xml"
+
+            # 1. Check if relation files are in the document, if not set to True
+            if rels_path not in namelist or docx_path not in namelist:
+                return True
+
+            # 2. Recover rIds linked to images
+            rels_xml = z.read(rels_path)
+            rels_root = ET.fromstring(rels_xml)
+
+            image_rids = set()
+            for rel in rels_root:
+                rel_type = rel.attrib.get("Type", "")
+                # Type standard OpenXML pour une image
+                if rel_type.endswith("/image"):
+                    rel_id = rel.attrib.get("Id")
+                    if rel_id:
+                        image_rids.add(rel_id)
+
+            if not image_rids:
+                return False
+
+            # 3. Check if one of the rIds is used in word/document.xml
+            doc_xml = z.read(docx_path).decode("utf-8", errors="ignore")
+
+            for rid in image_rids:
+                if f'="{rid}"' in doc_xml or f'="{rid}"' in doc_xml:
+                    return True
+
+        return False
 
 
 def basic_conversion(doc_path: str):
-    with config.fs.open(doc_path, "rb") as f:
-        markdown = config.basic_converter.convert(f).markdown
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        local_docx = os.path.join(tmp_dir, "temp_doc.docx")
+        config.fs.get(doc_path, local_docx)
+        markdown = config.basic_converter.convert(local_docx).markdown
 
     return markdown
 
 
 def llm_conversion(doc_path: str):
     with tempfile.TemporaryDirectory() as tmp_dir:
-        local_docx = tmp_dir + "input.docx"
-        local_pdf = tmp_dir + "output.pdf"
-
+        local_docx = os.path.join(tmp_dir, "input.docx")
         config.fs.get(doc_path, local_docx)
-        docx2pdf.convert(local_docx, local_pdf)
+
+        cmd = ['libreoffice', '--headless', '--convert-to', 'pdf', '--outdir', tmp_dir, local_docx]
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        local_pdf = os.path.join(tmp_dir, "input.pdf")
 
         markdown = config.llm_converter.convert(local_pdf).markdown
 
@@ -72,23 +115,26 @@ def llm_conversion(doc_path: str):
 
 
 def convert_docx_to_markdown(doc_path: str):
-    n_images = count_images(doc_path=doc_path)
+    has_images = docx_body_has_images_fast(doc_path=doc_path)
 
-    if n_images == 0:
+    if not has_images:
         markdown = basic_conversion(doc_path=doc_path)
     else:
         markdown = llm_conversion(doc_path=doc_path)
 
-    return markdown
+    return markdown, has_images
 
 
 def convert_all_docx_to_markdown(doc_paths: list[str]):
     markdowns = []
+    total_docs_with_images = 0
     for doc_path in tqdm(doc_paths):
-        markdown = convert_docx_to_markdown(doc_path)
-        markdowns.append(markdown)
+        markdown, has_images = convert_docx_to_markdown(doc_path)
 
-    return markdowns
+        markdowns.append(markdown)
+        total_docs_with_images += has_images
+
+    return markdowns, total_docs_with_images
 
 
 def configure_output_name(output_name: str, metadata_name: str):
@@ -128,7 +174,9 @@ def main():
 
     doc_paths = build_doc_paths(metadata=metadata)
 
-    markdowns = convert_all_docx_to_markdown(doc_paths=doc_paths)
+    markdowns, total_docs_with_images = convert_all_docx_to_markdown(doc_paths=doc_paths)
+
+    logger.info(f"Total document with images treated: {total_docs_with_images}.")
 
     metadata["markdown"] = markdowns
 
