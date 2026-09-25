@@ -1,0 +1,92 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: legifrance-transform-
+spec:
+  entrypoint: main-dag
+  # Nombre max de pods "transform-cpu" simultanés. À ajuster selon la
+  # capacité du cluster (chaque pod demande 2-8 CPU / 16-32 Gi ci-dessous).
+  parallelism: 5
+  lifecycleEventConfig:
+    handler: ""
+  templates:
+    - name: main-dag
+      dag:
+        tasks:
+          - name: transform-dataset
+            template: transform-cpu
+            arguments:
+              parameters:
+                - name: metadata_name
+                  value: "{{item.metadata_name}}"
+                - name: output_name
+                  value: "{{item.output_name}}"
+            # 9 datasets, un pod par dataset. Remplacer les noms de fichiers
+            # de metadata (et éventuellement les output_name) par les vôtres.
+            withItems:
+              - { metadata_name: "acco_metadata_2017_9_10_11_12.parquet", output_name: "acco_data_2017_9_10_11_12" }
+              - { metadata_name: "acco_metadata_2018.parquet", output_name: "acco_data_2018" }
+              - { metadata_name: "acco_metadata_2019.parquet", output_name: "acco_data_2019" }
+              - { metadata_name: "acco_metadata_2020.parquet", output_name: "acco_data_2020" }
+              - { metadata_name: "acco_metadata_2021.parquet", output_name: "acco_data_2021" }
+              - { metadata_name: "acco_metadata_2022.parquet", output_name: "acco_data_2022" }
+              - { metadata_name: "acco_metadata_2023.parquet", output_name: "acco_data_2023" }
+              - { metadata_name: "acco_metadata_2024.parquet", output_name: "acco_data_2024" }
+              - { metadata_name: "acco_metadata_2025.parquet", output_name: "acco_data_2025" }
+
+    # --- TEMPLATE CPU ---
+    - name: transform-cpu
+      inputs:
+        parameters:
+          - name: metadata_name
+          - name: output_name
+      # Si le pod crash (OOM, éviction de nœud, erreur S3 non résolue, ...),
+      # Argo relance le script : grâce au sharding, seuls les shards non
+      # encore présents sur S3 seront (re)traités, rien n'est perdu.
+      retryStrategy:
+        limit: 3
+        retryPolicy: "OnError"
+        backoff:
+          duration: "30s"
+          factor: "2"
+      script:
+        # Image de base CPU (comme dans l'exemple de training). Elle ne
+        # contient a priori pas LibreOffice : on l'installe au démarrage du
+        # script ci-dessous. Pour un lancement plus rapide sur 9 pods, il est
+        # préférable de construire une image dédiée qui embarque déjà
+        # LibreOffice + les dépendances Python (docling, markitdown, s3fs, uv).
+        image: "inseefrlab/onyxia-vscode-python:py3.13.5"
+        imagePullPolicy: Always
+        command: ["/bin/bash"]
+        source: |
+          set -e
+
+          echo "Installation de LibreOffice (nécessaire pour la conversion docx -> pdf)..."
+          apt-get update -qq && apt-get install -y --no-install-recommends libreoffice > /dev/null
+
+          # Remplacer par l'URL du dépôt contenant transform_docx_to_md.py et config.py
+          git clone -b main https://github.com/mateomorin/scrapping_accords.git
+          cd scrapping_accords
+
+          echo "Lancement de la transformation pour {{inputs.parameters.metadata_name}}..."
+          uv run python transform_docx_to_md.py \
+            --metadata_name {{inputs.parameters.metadata_name}} \
+            --output_name {{inputs.parameters.output_name}}
+        resources:
+          limits:
+            cpu: "8000m"
+            memory: "32Gi"
+          requests:
+            cpu: "2000m"
+            memory: "16Gi"
+        env:
+          - name: LLM_API_URL
+            valueFrom: { secretKeyRef: { name: llm-lab-api, key: LLM_API_URL } }
+          - name: LLM_API_KEY
+            valueFrom: { secretKeyRef: { name: llm-lab-api, key: LLM_API_KEY } }
+          - name: AWS_ACCESS_KEY_ID
+            valueFrom: { secretKeyRef: { name: s3-creds-legifrance, key: AWS_ACCESS_KEY_ID } }
+          - name: AWS_SECRET_ACCESS_KEY
+            valueFrom: { secretKeyRef: { name: s3-creds-legifrance, key: AWS_SECRET_ACCESS_KEY } }
+          - name: AWS_SESSION_TOKEN
+            valueFrom: { secretKeyRef: { name: s3-creds-legifrance, key: AWS_SESSION_TOKEN } }

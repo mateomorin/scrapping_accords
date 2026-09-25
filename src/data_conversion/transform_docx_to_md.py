@@ -1,15 +1,31 @@
 """
-Provided a metadata database, fetch all documents linked to it and apply a dox to markdown transformation.
-If a docx document contains images, convert it to pdf and use LLM-based OCR. 
+Fourni une base de metadata, récupère tous les documents liés et applique une
+transformation docx -> markdown. Si un document docx contient des images, il
+est converti en PDF puis passé dans un pipeline OCR basé sur un LLM.
+
+Le traitement est découpé en "shards" (SHARD_SIZE documents chacun) :
+  - chaque shard est sauvegardé sur S3 dès qu'il est terminé (checkpoint) ;
+  - un shard déjà présent sur S3 est ignoré au redémarrage (reprise après
+    crash / retry Argo), on ne retraite jamais tout depuis le début ;
+  - toute erreur sur un document individuel est capturée : le markdown est
+    remplacé par une chaîne vide et le détail (chemin, exception, traceback,
+    horodatage) est écrit dans un fichier de log dédié au shard sur S3 ;
+  - les fichiers de sortie restent petits (un fichier par shard) pour ne
+    jamais dépasser la limite de taille souhaitée.
 """
 import argparse
 import asyncio
+import json
 import logging
+import math
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import time
+import traceback
 import zipfile
 
 import pandas as pd
@@ -158,6 +174,9 @@ def llm_conversion(local_docx: str, tmp_dir: str):
 
 
 async def convert_docx_to_markdown(doc_path: str, semaphore: asyncio.Semaphore):
+    """
+    Designed to never raise Exceptions, returns empty markdown if error.
+    """
     async with semaphore:
         with tempfile.TemporaryDirectory() as task_tmp_dir:
             filename = doc_path.split("/")[-1]
@@ -174,44 +193,176 @@ async def convert_docx_to_markdown(doc_path: str, semaphore: asyncio.Semaphore):
                         llm_conversion, local_docx, task_tmp_dir
                     )
 
-                return markdown, has_images
+                return {"markdown": markdown, "has_images": has_images, "error": None, "traceback": None}
 
             except Exception as e:
-                logger.error(f"Erreur lors du traitement de {doc_path}: {e}")
-                return "", False
+                error_msg = f"{type(e).__name__}: {e}"
+                tb = traceback.format_exc()
+                logger.error(f"Error while treating {doc_path}: {error_msg}")
+                return {"markdown": "", "has_images": False, "error": error_msg, "traceback": tb}
 
 
-async def convert_all_docx_to_markdown(doc_paths: list[str]):
-    markdowns = []
+def _s3_write_with_retry(write_fn, description: str, *args, **kwargs) -> bool:
+    """
+    Apply write_fn with several trials. Never raises errors except too many trials.
+    """
+    last_exc = None
+    for attempt in range(config.S3_WRITE_RETRIES):
+        try:
+            write_fn(*args, **kwargs)
+            return True
+        except Exception as e:
+            last_exc = e
+            wait = config.S3_WRITE_RETRY_BASE_DELAY * (2 ** attempt)
+            logger.warning(
+                f"S3 writing failure ({description}), attempt "
+                f"{attempt + 1}/{config.S3_WRITE_RETRIES} : {e}. "
+                f"New attempt in {wait}s."
+            )
+            time.sleep(wait)
+
+    logger.error(f"S3 writing definitively failed ({description}) : {last_exc}")
+    return False
+
+
+def _write_shard_parquet(df: pd.DataFrame, path: str):
+    df.to_parquet(path, filesystem=config.fs, index=False)
+
+
+def _write_error_log(errors: list, path: str):
+    with config.fs.open(path, "w") as f:
+        for record in errors:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def shard_output_path(output_name: str, shard_idx: int) -> str:
+    return f"{config.FULL_DATA_PATH}{output_name}/shard_{shard_idx:05d}.parquet"
+
+
+def shard_error_log_path(output_name: str, shard_idx: int) -> str:
+    return f"{config.LOGS_PATH}{output_name}_errors/shard_{shard_idx:05d}.jsonl"
+
+
+def list_existing_shards(output_name: str) -> set:
+    """
+    List shards already in S3 after crash or retry by Argo.
+    Do not treat an already-finished one.
+    """
+    prefix = f"{config.FULL_DATA_PATH}{output_name}/"
+    try:
+        files = config.fs.ls(prefix)
+    except FileNotFoundError:
+        return set()
+
+    existing = set()
+    for f in files:
+        name = f.split("/")[-1]
+        if name.startswith("shard_") and name.endswith(".parquet"):
+            try:
+                existing.add(int(name[len("shard_"):-len(".parquet")]))
+            except ValueError:
+                continue
+    return existing
+
+
+async def process_dataset(metadata_name: str, output_name: str):
+    metadata = fetch_metadata(metadata_name=metadata_name)
+    metadata = metadata.reset_index(drop=True)
+    doc_paths = build_doc_paths(metadata=metadata)
+
+    n_docs = len(doc_paths)
+    n_shards = math.ceil(n_docs / config.SHARD_SIZE)
+    logger.info(f"[{output_name}] {n_docs} documents à traiter, découpés en {n_shards} shards de {config.SHARD_SIZE}.")
+
+    existing_shards = list_existing_shards(output_name)
+    if existing_shards:
+        logger.info(
+            f"[{output_name}] {len(existing_shards)} shard(s) déjà présents sur S3, "
+            f"ils seront ignorés (reprise après crash/retry)."
+        )
+
     semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY_DOC)
 
-    tasks = [
-        convert_docx_to_markdown(doc_path=doc_path, semaphore=semaphore)
-        for doc_path in doc_paths
-    ]
+    total_with_images = 0
+    total_errors = 0
 
-    results = await tqdm_asyncio.gather(*tasks, desc="Traitement des documents")
+    for shard_idx in range(n_shards):
+        if shard_idx in existing_shards:
+            continue
 
-    markdowns = [res[0] for res in results]
-    total_docs_with_images = sum(res[1] for res in results)
+        start = shard_idx * config.SHARD_SIZE
+        end = min(start + config.SHARD_SIZE, n_docs)
+        shard_paths = doc_paths[start:end]
+        shard_metadata = metadata.iloc[start:end].copy()
 
-    return markdowns, total_docs_with_images
+        logger.info(f"[{output_name}] Shard {shard_idx + 1}/{n_shards} ({start}-{end - 1})")
+
+        tasks = [convert_docx_to_markdown(doc_path=p, semaphore=semaphore) for p in shard_paths]
+        results = await tqdm_asyncio.gather(*tasks, desc=f"{output_name} - shard {shard_idx}")
+
+        shard_metadata["markdown"] = [r["markdown"] for r in results]
+        shard_metadata["has_images"] = [r["has_images"] for r in results]
+        shard_metadata["conversion_error"] = [r["error"] for r in results]
+
+        shard_errors = []
+        for path, r in zip(shard_paths, results):
+            if r["error"] is not None:
+                shard_errors.append({
+                    "doc_path": path,
+                    "shard_idx": shard_idx,
+                    "error": r["error"],
+                    "traceback": r["traceback"],
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+
+        total_with_images += sum(r["has_images"] for r in results)
+        total_errors += len(shard_errors)
+
+        # --- Sauvegarde immédiate du shard sur S3 (checkpoint) ---
+        ok = _s3_write_with_retry(
+            _write_shard_parquet,
+            f"shard {shard_idx} de {output_name}",
+            shard_metadata,
+            shard_output_path(output_name, shard_idx),
+        )
+        if not ok:
+            # On arrête proprement ce dataset : Argo pourra relancer le job,
+            # qui reprendra à partir de ce shard grâce à list_existing_shards.
+            raise RuntimeError(
+                f"[{output_name}] Impossible d'écrire le shard {shard_idx} sur S3 "
+                f"après {config.S3_WRITE_RETRIES} tentatives."
+            )
+
+        # --- Sauvegarde du log d'erreurs du shard (uniquement s'il y en a) ---
+        if shard_errors:
+            _s3_write_with_retry(
+                _write_error_log,
+                f"log d'erreurs shard {shard_idx} de {output_name}",
+                shard_errors,
+                shard_error_log_path(output_name, shard_idx),
+            )
+
+        logger.info(
+            f"[{output_name}] Shard {shard_idx} sauvegardé "
+            f"({len(shard_errors)} erreur(s) sur {len(shard_paths)} documents)."
+        )
+
+    logger.info(
+        f"[{output_name}] Terminé. Documents avec images : {total_with_images}. "
+        f"Documents en erreur (texte vide) : {total_errors}/{n_docs}."
+    )
 
 
 def configure_output_name(output_name: str, metadata_name: str):
     if output_name == "default":
-        output_name = metadata_name.replace("metadata", "data")
+        output_name = metadata_name.replace("metadata", "data").replace(".parquet", "")
 
     return output_name
 
 
-def export_full_data(data: pd.DataFrame, output_name: str):
-    data.to_parquet(config.FULL_DATA_PATH + output_name)
-
-
 def main():
     parser = argparse.ArgumentParser(
-        description="Scrapping of ACCO by month and year"
+        description="Transformation docx -> markdown with sharding, S3 checkpoints S3 and crash recovery"
     )
 
     parser.add_argument(
@@ -226,27 +377,17 @@ def main():
         type=str,
         required=False,
         default="default",
-        help="Name of the output file (parquet), or 'default'"
+        help="Name of the output directory (will contain shard_*.parquet), or 'default'"
     )
 
     args = parser.parse_args()
-
-    metadata = fetch_metadata(metadata_name=args.metadata_name)
-
-    doc_paths = build_doc_paths(metadata=metadata)
-
-    markdowns, total_docs_with_images = asyncio.run(convert_all_docx_to_markdown(doc_paths=doc_paths))
-
-    logger.info(f"Total document with images treated: {total_docs_with_images}.")
-
-    metadata["markdown"] = markdowns
 
     output_name = configure_output_name(
         output_name=args.output_name,
         metadata_name=args.metadata_name
     )
 
-    export_full_data(data=metadata, output_name=output_name)
+    asyncio.run(process_dataset(metadata_name=args.metadata_name, output_name=output_name))
 
 
 if __name__ == "__main__":
