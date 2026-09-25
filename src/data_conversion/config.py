@@ -91,16 +91,9 @@ docling_llm_converter = DocumentConverter(
 # Async
 MAX_CONCURRENCY_DOC = 5
 
-# --- Sharding / checkpointing ---
-# Nombre de documents traités par "shard" : c'est à la fois la fréquence de
-# sauvegarde intermédiaire sur S3 (checkpoint) ET la taille des fichiers de
-# sortie. À ajuster après un premier run en observant la taille réelle d'un
-# fichier shard_*.parquet (viser << 1 Go pour rester large sous la limite).
+# Sharding / checkpointing
 SHARD_SIZE = 2000
 
-# --- Retry écriture S3 ---
-# En cas d'échec d'écriture (shard ou log d'erreurs) sur S3, on retente avec
-# un backoff exponentiel avant d'abandonner (ce qui fait échouer le job pour
-# que Argo puisse le relancer proprement grâce à la reprise par shard).
+# Retry S3 writing
 S3_WRITE_RETRIES = 4
-S3_WRITE_RETRY_BASE_DELAY = 5  # secondes ; délai = BASE_DELAY * 2**tentative
+S3_WRITE_RETRY_BASE_DELAY = 5  # seconds ; delay = BASE_DELAY * 2**attemps
