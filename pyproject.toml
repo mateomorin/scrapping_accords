@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "boto3>=1.43.75",
+    "docling>=2.130.0",
     "docx2pdf>=0.1.8",
     "httpx>=0.28.1",
     "ipython>=9.17.1",

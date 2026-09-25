@@ -3,6 +3,7 @@ Provided a metadata database, fetch all documents linked to it and apply a dox t
 If a docx document contains images, convert it to pdf and use LLM-based OCR. 
 """
 import argparse
+import asyncio
 import logging
 import os
 from pathlib import Path
@@ -12,7 +13,7 @@ import tempfile
 import zipfile
 
 import pandas as pd
-from tqdm import tqdm
+from tqdm.asyncio import tqdm_asyncio
 import xml.etree.ElementTree as ET
 
 import config
@@ -20,6 +21,7 @@ import config
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx2").setLevel(logging.WARNING)
+logging.getLogger("docling").setLevel(logging.WARNING)
 
 
 def fetch_metadata(metadata_name: str):
@@ -131,8 +133,13 @@ def llm_conversion(local_docx: str, tmp_dir: str):
 
     repair_docx(local_docx, cleaned_docx)
 
+    # User profile for async mode
+    user_profile_dir = os.path.join(tmp_dir, "lo_profile")
+    os.makedirs(user_profile_dir, exist_ok=True)
+
     cmd = [
         'libreoffice',
+        f'-env:UserInstallation=file://{user_profile_dir}',
         '--headless',
         '--convert-to', 'pdf',
         '--outdir', tmp_dir,
@@ -141,50 +148,52 @@ def llm_conversion(local_docx: str, tmp_dir: str):
 
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=60)
 
-    markdown = config.llm_converter.convert(expected_pdf).markdown
+    markdown = config.docling_llm_converter.convert(expected_pdf).document.export_to_markdown()
 
     # Clean-up
     if os.path.exists(cleaned_docx):
         os.remove(cleaned_docx)
 
-    return markdown, expected_pdf
+    return markdown
 
 
-def convert_docx_to_markdown(doc_path: str, tmp_dir: str):
-    filename = doc_path.split("/")[-1]
-    local_docx = os.path.join(tmp_dir, filename)
-    local_pdf = None
+async def convert_docx_to_markdown(doc_path: str, semaphore: asyncio.Semaphore):
+    async with semaphore:
+        with tempfile.TemporaryDirectory() as task_tmp_dir:
+            filename = doc_path.split("/")[-1]
+            local_docx = os.path.join(task_tmp_dir, filename)
 
-    try:
-        config.fs.get(doc_path, local_docx)
+            try:
+                await asyncio.to_thread(config.fs.get, doc_path, local_docx)
 
-        has_images = docx_body_has_images_fast(local_docx=local_docx)
-        if not has_images:
-            markdown = basic_conversion(local_docx=local_docx)
-        else:
-            markdown, local_pdf = llm_conversion(local_docx=local_docx, tmp_dir=tmp_dir)
+                has_images = await asyncio.to_thread(docx_body_has_images_fast, local_docx)
+                if not has_images:
+                    markdown = await asyncio.to_thread(basic_conversion, local_docx)
+                else:
+                    markdown = await asyncio.to_thread(
+                        llm_conversion, local_docx, task_tmp_dir
+                    )
 
-        return markdown, has_images
+                return markdown, has_images
 
-    finally:
-        # Always clear files at the end
-        if os.path.exists(local_docx):
-            os.remove(local_docx)
-        if local_pdf and os.path.exists(local_pdf):
-            os.remove(local_pdf)
+            except Exception as e:
+                logger.error(f"Erreur lors du traitement de {doc_path}: {e}")
+                return "", False
 
 
-def convert_all_docx_to_markdown(doc_paths: list[str]):
+async def convert_all_docx_to_markdown(doc_paths: list[str]):
     markdowns = []
-    total_docs_with_images = 0
+    semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY_DOC)
 
-    # Unique temp dir for document creation
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        for doc_path in tqdm(doc_paths):
-            markdown, has_images = convert_docx_to_markdown(doc_path=doc_path, tmp_dir=tmp_dir)
+    tasks = [
+        convert_docx_to_markdown(doc_path=doc_path, semaphore=semaphore)
+        for doc_path in doc_paths
+    ]
 
-            markdowns.append(markdown)
-            total_docs_with_images += has_images
+    results = await tqdm_asyncio.gather(*tasks, desc="Traitement des documents")
+
+    markdowns = [res[0] for res in results]
+    total_docs_with_images = sum(res[1] for res in results)
 
     return markdowns, total_docs_with_images
 
@@ -226,7 +235,7 @@ def main():
 
     doc_paths = build_doc_paths(metadata=metadata)
 
-    markdowns, total_docs_with_images = convert_all_docx_to_markdown(doc_paths=doc_paths)
+    markdowns, total_docs_with_images = asyncio.run(convert_all_docx_to_markdown(doc_paths=doc_paths))
 
     logger.info(f"Total document with images treated: {total_docs_with_images}.")
 
