@@ -1,24 +1,19 @@
 """
-Traitement d'un document individuel :
-  données brutes -> sniffing -> extraction déterministe (docx/pptx/pdf/rtf/html)
-  -> structure (sections) -> triage des images -> record structuré (JSON).
+Processing of a single document:
+  raw bytes -> sniffing -> deterministic extraction (docx/pptx/odf/pdf/rtf/html)
+  -> structure (sections) -> image triage -> structured record (JSON).
 
-Utilisé par step2_extract.py (sur S3) et selftest.py (fichiers locaux).
+Used by steps/step2_extract.py (on S3) and selftest.py (local files).
 """
-import io
 import json
 import logging
-import re
-import zipfile
 
-import config
-import extract_odf
-import extract_pdf
-import extract_slides
-import extract_word
-import structure
-import triage
-from utils import sniff_format
+from . import structure, triage
+from .extract import odf as extract_odf
+from .extract import pdf as extract_pdf
+from .extract import slides as extract_slides
+from .extract import word as extract_word
+from .utils import sniff_format
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +26,7 @@ def _esc_cell(c) -> str:
 
 
 def render_table_md(grid) -> str:
-    """Rendu Markdown d'une grille (cellules vides réellement vides)."""
+    """Markdown rendering of a grid (empty cells really empty)."""
     if not grid:
         return ""
     lines = []
@@ -61,7 +56,7 @@ def _make_figure(fid, spec, origin, data, extra=None) -> dict:
 
 
 def _process_embedded(entry, zf, blocks, errors, stats, seen_hashes_holder) -> None:
-    """Développe un objet OLE (diapositives PPT) ou le signale illisible."""
+    """Expands an OLE object (PPT slides) or flags it as unreadable."""
     part = entry.get("part") or ""
     low = part.lower()
     if low.endswith(PPT_EXT):
@@ -88,11 +83,11 @@ def _process_embedded(entry, zf, blocks, errors, stats, seen_hashes_holder) -> N
                     elif sb["type"] == "slide_error":
                         errors.append(f"slide {sb['part']}: {sb['error']}")
         except Exception as e:
-            errors.append(f"objet embarqué {part}: {e}")
+            errors.append(f"embedded object {part}: {e}")
             stats["unreadable"].append(part)
     elif low.endswith((".ppt", ".bin", ".doc", ".xls", ".docx")):
-        # Binaire OLE non lisible en XML : la seule représentation exploitable
-        # est l'image de prévisualisation (EMF/WMF) -> on la file pour OCR.
+        # Binary OLE not readable as XML: the only exploitable representation
+        # is the preview image (EMF/WMF) -> queue it for OCR.
         if entry.get("preview"):
             blocks.append(
                 {"kind": "figure", "origin": "ole_preview", "spec": entry["preview"],
@@ -123,7 +118,7 @@ def _process_odf(data: bytes) -> dict:
             raw_blocks.append(b)
         elif b["type"] == "table":
             raw_blocks.append(b)
-    # images (position non fiable dans le flux : rangées en fin de document)
+    # images (position not reliable in the stream: appended at the end)
     for spec in doc["figures"]:
         raw_blocks.append(
             {"kind": "figure", "origin": "inline", "spec": spec,
@@ -223,8 +218,8 @@ def _process_pdf(data: bytes) -> dict:
             t = dict(t)
             t["page"] = page["page"]
             raw_blocks.append(t)
-    # Les images (pypdf) n'ont pas de position fiable dans le flux de texte :
-    # elles sont rangées à la fin du document.
+    # Images (pypdf) have no reliable position in the text stream:
+    # they are appended at the end of the document.
     for img in pdf["images"]:
         raw_blocks.append(
             {"kind": "figure", "origin": "pdf",
@@ -236,7 +231,7 @@ def _process_pdf(data: bytes) -> dict:
         "format": "pdf",
         "doc_type": "pdf_scanned" if scanned else "pdf",
         "raw_blocks": raw_blocks,
-        "errors": [] if not scanned else ["pdf_scanned: aucune couche texte"],
+        "errors": [] if not scanned else ["pdf_scanned: no text layer"],
         "stats": {"n_pages": pdf["n_pages"], "total_chars": pdf["total_chars"]},
         "info": {},
         "extra": {},
@@ -313,10 +308,10 @@ def _process_html(data: bytes) -> dict:
 def process_document_bytes(data: bytes, cid: str, reference: str,
                            upload_figure=None, figs_base: str | None = None) -> dict:
     """
-    Traite les octets bruts d'un document et retourne le record structuré.
+    Processes the raw bytes of a document and returns the structured record.
 
-    upload_figure(fig_s3, bytes) est appelé pour chaque image conservée par le
-    triage (None en local). figs_base : préfixe S3 des figures.
+    upload_figure(fig_s3, bytes) is called for each image kept by the triage
+    (None locally). figs_base: S3 prefix of the figures.
     """
     fmt = sniff_format(data)
 
@@ -335,13 +330,13 @@ def process_document_bytes(data: bytes, cid: str, reference: str,
     else:
         proc = {
             "format": fmt, "doc_type": "unknown", "raw_blocks": [],
-            "errors": [f"format non reconnu: {fmt}"], "stats": {}, "info": {},
+            "errors": [f"unrecognized format: {fmt}"], "stats": {}, "info": {},
             "extra": {}, "data": data,
         }
 
     raw_blocks = proc["raw_blocks"]
 
-    # --- items unifiés (paragraphes + tables + figures, dans l'ordre) ---
+    # --- unified items (paragraphs + tables + figures, in order) ---
     items = []
     para_units = []
     last_para_idx = None
@@ -378,7 +373,7 @@ def process_document_bytes(data: bytes, cid: str, reference: str,
             data_img = b.get("data")
             fig = _make_figure(fid, b["spec"], b.get("origin") or "inline", data_img,
                                extra=b.get("extra"))
-            # triage (heuristiques uniquement)
+            # triage (heuristics only)
             keep, reason = triage.triage_figure(fig, len(items), len(raw_blocks), seen_hashes)
             fig["triage"] = {"keep": keep, "reason": reason}
             if keep and upload_figure is not None and figs_base:
@@ -400,9 +395,12 @@ def process_document_bytes(data: bytes, cid: str, reference: str,
     for i, u in enumerate(para_units):
         scored[i] = structure.score_paragraph(u["text"], u["feat"])
     sig_start = structure.find_signature_start(para_units)
-    tree = structure.build_structure(items, scored, para_units, sig_start)
+    # offset = 1 when the document has TITRE/CHAPITRE containers: articles
+    # are then attached one level lower (scope of the title).
+    offset = structure.compute_offset(scored)
+    tree = structure.build_structure(items, scored, para_units, sig_start, offset)
 
-    # --- assemblage du record ---
+    # --- record assembly ---
     toc = [
         {"id": s["id"], "level": s["level"], "number": s["number"],
          "title": s["title"], "confidence": s["confidence"]}

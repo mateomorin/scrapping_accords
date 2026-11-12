@@ -1,12 +1,12 @@
 """
-Configuration du pipeline d'extraction de structure pour le sous-ensemble
-"Heures supplémentaires (contingent, majoration)".
+Pipeline configuration for the "Heures supplémentaires (contingent,
+majoration)" (overtime - contingent, majoration) subset.
 
-Lecture seule (jamais d'écriture) :
-    - s3://mateomorin/legifrance/metadata/   (parquets de metadata scrapés)
-    - s3://mateomorin/legifrance/documents/  (documents bruts scrapés)
+Read-only (never written to):
+    - s3://mateomorin/legifrance/metadata/   (scraped metadata parquets)
+    - s3://mateomorin/legifrance/documents/  (scraped raw documents)
 
-Écriture (zone autorisée UNIQUEMENT, vérifiée par utils.safe_remote_path) :
+Write (authorized zone ONLY, enforced by utils.safe_remote_path):
     - s3://mateomorin/legifrance/data_heures_supp/data/
     - s3://mateomorin/legifrance/data_heures_supp/logs/
 """
@@ -26,27 +26,28 @@ fs = s3fs.S3FileSystem(
     client_kwargs={"region_name": S3_REGION},
 )
 
-# Chemins sources (lecture seule)
+# Source paths (read-only)
 METADATA_PATH = "s3://mateomorin/legifrance/metadata/"
 DOCUMENTS_PATH = "s3://mateomorin/legifrance/documents/"
 
-# Racine de sortie (seule zone d'écriture)
+# Output root (only writable zone)
 OUTPUT_ROOT = "s3://mateomorin/legifrance/data_heures_supp/"
 DATA_PATH = OUTPUT_ROOT + "data/"
 LOGS_PATH = OUTPUT_ROOT + "logs/"
-FIGS_PATH = DATA_PATH + "figs/"  # images conservées par le triage (pour l'OCR step 3)
+FIGS_PATH = DATA_PATH + "figs/"  # figures kept by the triage (for step 3 OCR)
 
 SELECTION_FILE = LOGS_PATH + "selection.parquet"
 PROFILE_FILE = LOGS_PATH + "profile_subset.parquet"
 
-# --- Sélection (step 0) ---------------------------------------------------
-# Colonnes booléennes de la table de metadata ; le document appartient à la
-# catégorie si l'une d'elles est True.
+# --- Selection (step 0) ---------------------------------------------------
+# Boolean columns of the metadata table; a document belongs to the subset if
+# at least one of them is True. (Column names are part of the upstream data
+# contract: keep them as-is.)
 THEME_COLUMNS = ["Heures supplémentaires (contingent, majoration)"]
 
-# --- LLM (OCR des images conservées, step 3) ------------------------------
-# Compatible avec les variables du .env existant (LLM_API_URL/KEY) ou, en
-# secours, OPENAI_BASE_URL/OPENAI_API_KEY.
+# --- LLM (OCR of the kept images, step 3) ---------------------------------
+# Compatible with the existing .env variables (LLM_API_URL/KEY) or, as a
+# fallback, OPENAI_BASE_URL/OPENAI_API_KEY.
 LLM_API_URL = os.environ.get("LLM_API_URL") or os.environ.get("OPENAI_BASE_URL", "")
 LLM_API_KEY = os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
 LLM_MODEL = os.environ.get("LLM_OCR_MODEL", "gemma4-26b-moe")
@@ -62,16 +63,16 @@ OCR_PROMPT = (
 )
 
 # --- Concurrency / sharding ------------------------------------------------
-MAX_CONCURRENCY_DOWNLOAD = 10  # téléchargements S3 parallèles (step 2, run complet)
-MAX_CONCURRENCY_OCR = 4        # appels LLM parallèles (step 3)
-SHARD_SIZE = 500               # documents par shard de sortie
+MAX_CONCURRENCY_DOWNLOAD = 10  # parallel S3 downloads (step 2, full run)
+MAX_CONCURRENCY_OCR = 4        # parallel LLM calls (step 3)
+SHARD_SIZE = 500               # documents per output shard
 
-# --- Triage des images (heuristiques uniquement, step 2) -------------------
-MIN_OCR_IMAGE_BYTES = 20_000      # plus petit que ça => icône/logo => drop
-VECTOR_LOGO_MAX_BYTES = 300_000   # wmf/emf plus petits que ça => logo/glyphe => drop
-SIGNATURE_ZONE_FRACTION = 0.10    # les 10 % de blocs finaux = zone de signature
-DEDUPE_IMAGES = True              # dédoublonnage par hash perceptuel (png/jpg)
+# --- Image triage (heuristics only, step 2) --------------------------------
+MIN_OCR_IMAGE_BYTES = 20_000      # smaller than this => icon/logo => drop
+VECTOR_LOGO_MAX_BYTES = 300_000   # wmf/emf smaller than this => logo/glyph => drop
+SIGNATURE_ZONE_FRACTION = 0.10    # the last 10% of blocks = signature zone
+DEDUPE_IMAGES = True              # deduplication by perceptual hash (png/jpg)
 
-# --- Retries d'écriture S3 -------------------------------------------------
+# --- S3 write retries -------------------------------------------------------
 S3_WRITE_RETRIES = 4
-S3_WRITE_RETRY_BASE_DELAY = 5  # secondes ; délai = base * 2**attempt
+S3_WRITE_RETRY_BASE_DELAY = 5  # seconds; delay = base * 2**attempt

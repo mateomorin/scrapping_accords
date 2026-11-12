@@ -1,32 +1,30 @@
 """
-Extraction déterministe des blocs (paragraphes, tableaux, images, objets
-embarqués) d'un fichier DOCX, au niveau zip/XML (lxml).
+Deterministic extraction of blocks (paragraphs, tables, images, embedded
+objects) from a DOCX file, at the zip/XML level (lxml).
 
-Pourquoi pas python-docx ? Il n'expose pas les objets OLE embarqués
-(p. ex. des diapositives PowerPoint intégrées), qui sont pourtant le
-contenu principal de certains accords.
+Why not python-docx? It does not expose embedded OLE objects (e.g. embedded
+PowerPoint slides), which are nonetheless the main content of some agreements.
 
-Le document est modélisé comme une liste ordonnée de blocs :
-    {"type": "para",     "text", "feat", "images": [figspec], "objects": [part]}
-    {"type": "table",    "grid", "spans", "vmerge", "n_rows", "n_cols"}
+The document is modeled as an ordered list of blocks:
+    {"type": "para",  "text", "feat", "images": [figspec], "objects": [part]}
+    {"type": "table", "grid", "spans", "vmerge", "n_rows", "n_cols"}
 
 figspec = {"part": "word/media/image3.emf", "fmt": "emf", "size": 12345}
 
-Robustesse :
-- les espaces de noms sont résolus par DOCUMENT à partir de la racine
-  (certains éditeurs émettent la variante purl.oclc.org au lieu de
-  schemas.openxmlformats.org),
-- la partie principale du document est découverte via _rels/.rels
-  (type officeDocument) : certains fichiers ont word/document2.xml,
-- le XML est parsé en mode "recover" pour tolérer les caractères
-  PCDATA invalides (char. de contrôle).
+Robustness:
+- namespaces are resolved PER DOCUMENT from the root (some editors emit the
+  purl.oclc.org variant instead of schemas.openxmlformats.org),
+- the main document part is discovered via _rels/.rels (type
+  officeDocument): some files have word/document2.xml,
+- the XML is parsed in "recover" mode to tolerate invalid PCDATA characters
+  (control characters).
 """
 import io
 import os
 import zipfile
 from lxml import etree
 
-# Valeurs par défaut (variantes standards OOXML)
+# Default values (standard OOXML variants)
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 V = "urn:schemas-microsoft-com:vml"
@@ -36,7 +34,7 @@ WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
 
 
 class _Ns:
-    """Espaces de noms résolus pour un document donné."""
+    """Namespaces resolved for a given document."""
 
     __slots__ = ("W", "R", "V", "O", "A", "WP")
 
@@ -53,7 +51,7 @@ class _Ns:
 
 
 def parse_rels(zf: zipfile.ZipFile, rels_path: str) -> dict:
-    """rId -> {'type': str (dernier segment), 'target': str}."""
+    """rId -> {'type': str (last segment), 'target': str}."""
     out = {}
     try:
         xml = zf.read(rels_path)
@@ -72,9 +70,9 @@ def parse_rels(zf: zipfile.ZipFile, rels_path: str) -> dict:
 
 def _find_main_part(zf: zipfile.ZipFile) -> str:
     """
-    Partie principale du document (normalement word/document.xml).
-    Découverte via la relation officeDocument de _rels/.rels ; certains
-    fichiers ont word/document2.xml ou autre.
+    Main document part (normally word/document.xml).
+    Discovered via the officeDocument relation of _rels/.rels; some
+    files have word/document2.xml or similar.
     """
     names = set(zf.namelist())
     for rel in parse_rels(zf, "_rels/.rels").values():
@@ -84,12 +82,12 @@ def _find_main_part(zf: zipfile.ZipFile) -> str:
                 return part
     if "word/document.xml" in names:
         return "word/document.xml"
-    # dernier recours : toute partie word/document*.xml
+    # last resort: any word/document*.xml part
     for n in sorted(names):
         base = os.path.basename(n)
         if n.startswith("word/") and base.startswith("document") and n.endswith(".xml"):
             return n
-    raise KeyError("partie principale du document introuvable")
+    raise KeyError("document main part not found")
 
 
 def _doc_rels_path(main_part: str) -> str:
@@ -99,7 +97,7 @@ def _doc_rels_path(main_part: str) -> str:
 
 
 def _resolve_part(target: str, base_dir: str) -> str:
-    """Target relatif aux rels d'une partie -> nom complet dans le zip."""
+    """Target relative to a part's rels -> full name inside the zip."""
     if target.startswith("/"):
         return target.lstrip("/")
     if base_dir:
@@ -108,7 +106,7 @@ def _resolve_part(target: str, base_dir: str) -> str:
 
 
 def _media_index(zf: zipfile.ZipFile, prefix: str) -> dict:
-    """part -> {'size', 'fmt'} pour les parties media/ d'un zip."""
+    """part -> {'size', 'fmt'} for the media/ parts of a zip."""
     out = {}
     for name in zf.namelist():
         if name.startswith(prefix):
@@ -149,14 +147,41 @@ def _run_features(ns: _Ns, r: etree._Element) -> tuple:
         sz = rpr.find(ns.q("W", "sz"))
         if sz is not None:
             try:
-                feat["sz"] = int(sz.get(ns.q("W", "val")))  # demi-points
+                feat["sz"] = int(sz.get(ns.q("W", "val")))  # half-points
             except (TypeError, ValueError):
                 pass
     return text, feat
 
 
+def _style_outlines(zf: zipfile.ZipFile, ns: _Ns) -> dict:
+    """
+    styleId -> outline level (1-based) defined in word/styles.xml.
+    Built-in Word styles ("Titre 1", "Heading1", ...) carry their
+    w:outlineLvl in the style, not in each paragraph.
+    """
+    out = {}
+    try:
+        root = _xml_recover(zf.read("word/styles.xml"))
+    except (KeyError, etree.XMLSyntaxError):
+        return out
+    for st in root.iter(ns.q("W", "style")):
+        sid = st.get(ns.q("W", "styleId"))
+        ppr = st.find(ns.q("W", "pPr"))
+        if sid is None or ppr is None:
+            continue
+        ol = ppr.find(ns.q("W", "outlineLvl"))
+        if ol is None:
+            continue
+        try:
+            # Word outlineLvl is 0-based -> stored 1-based
+            out[sid] = int(ol.get(ns.q("W", "val"))) + 1
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
 def parse_para(ns: _Ns, p: etree._Element, rels: dict, zf: zipfile.ZipFile,
-               base_dir: str) -> dict:
+               base_dir: str, style_outlines: dict | None = None) -> dict:
     text_parts = []
     bold_chars = u_chars = caps_chars = 0
     total = 0
@@ -174,7 +199,7 @@ def parse_para(ns: _Ns, p: etree._Element, rels: dict, zf: zipfile.ZipFile,
         if feat["caps"]:
             caps_chars += len(text)
         if feat["sz"]:
-            size_pts.append(feat["sz"] / 2)  # demi-points -> points
+            size_pts.append(feat["sz"] / 2)  # half-points -> points
 
     text = "".join(text_parts)
     ppr = p.find(ns.q("W", "pPr"))
@@ -188,14 +213,19 @@ def parse_para(ns: _Ns, p: etree._Element, rels: dict, zf: zipfile.ZipFile,
         ol = ppr.find(ns.q("W", "outlineLvl"))
         if ol is not None:
             try:
-                outline = int(ol.get(ns.q("W", "val")))
+                # Word: outlineLvl is 0-based; we store it 1-based
+                # (consistent with ODF text:outline-level).
+                outline = int(ol.get(ns.q("W", "val"))) + 1
             except (TypeError, ValueError):
                 pass
+        if outline is None and style and style_outlines:
+            # level carried by the paragraph style (w:pStyle)
+            outline = style_outlines.get(style)
 
     letters = [c for c in text if c.isalpha()]
     caps_frac = sum(1 for c in letters if c.isupper()) / len(letters) if letters else 0.0
 
-    # --- objets OLE embarqués (partie + image de prévisualisation) ---
+    # --- embedded OLE objects (part + preview image) ---
     objects = []
     obj_preview_rids = set()
     for obj in p.iter(ns.q("W", "object")):
@@ -217,7 +247,7 @@ def parse_para(ns: _Ns, p: etree._Element, rels: dict, zf: zipfile.ZipFile,
         if entry is not None:
             objects.append(entry)
 
-    # --- images inline (hors prévisualisations d'objets) ---
+    # --- inline images (excluding object previews) ---
     images = []
     seen = set()
     for im in p.iter(f"{ns.q('V', 'imagedata')}"):
@@ -294,15 +324,15 @@ def parse_table(ns: _Ns, tbl: etree._Element) -> dict:
 
 
 def _xml_recover(data: bytes) -> etree._Element:
-    """Parsage tolérant (char. PCDATA invalides : char. de contrôle)."""
+    """Tolerant parse (invalid PCDATA chars: control characters)."""
     parser = etree.XMLParser(recover=True, huge_tree=True)
     return etree.fromstring(data, parser)
 
 
 def extract_docx(data: bytes) -> dict:
     """
-    Retourne {"blocks", "info", "zf"}.
-    zf est conservé ouvert : les parties embarquées (.sldx...) s'y lisent ensuite.
+    Returns {"blocks", "info", "zf"}.
+    zf is kept open: embedded parts (.sldx...) are read from it later.
     """
     zf = zipfile.ZipFile(io.BytesIO(data))
     main_part = _find_main_part(zf)
@@ -312,17 +342,20 @@ def extract_docx(data: bytes) -> dict:
     ns = _Ns(root.nsmap or {})
     body = root.find(ns.q("W", "body"))
 
+    # outline levels carried by paragraph styles (w:pStyle -> styles.xml)
+    style_outlines = _style_outlines(zf, ns)
+
     blocks = []
     if body is None:
-        raise ValueError(f"document principal {main_part!r} sans <body>")
+        raise ValueError(f"main part {main_part!r} has no <body>")
     for el in body:
         if el.tag == ns.q("W", "p"):
-            blocks.append(parse_para(ns, el, rels, zf, base_dir))
+            blocks.append(parse_para(ns, el, rels, zf, base_dir, style_outlines))
         elif el.tag == ns.q("W", "tbl"):
             blocks.append(parse_table(ns, el))
-        # w:sectPr et autres : ignorés
+        # w:sectPr and others: ignored
 
-    # --- inventaire des images d'en-tête/pied de page (jamais OCR'd) ---
+    # --- inventory of header/footer images (never OCR'd) ---
     hf_parts = set()
     for name in zf.namelist():
         if (name.startswith(f"{base_dir}/_rels/header") or name.startswith(f"{base_dir}/_rels/footer")) \

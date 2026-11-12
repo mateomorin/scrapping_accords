@@ -1,15 +1,15 @@
 """
-Extraction déterministe des blocs d'un fichier ODF (OpenDocument, .odt).
+Deterministic extraction of blocks from an ODF (OpenDocument, .odt) file.
 
-Certains accords sont des ODF (mimetype + content.xml) enregistrés avec une
-extension .docx forcée par le scraper. ODF est un XML plat et lisible :
-- text:h      : titre natif avec text:outline-level (signal fort)
-- text:p      : paragraphe (text:span avec styles -> gras/souligné)
-- table:table : tableau avec number-columns/rows-spanned + covered-table-cell
-- text:list   : listes (items marqués is_list)
+Some agreements are ODF (mimetype + content.xml) saved with a .docx
+extension forced by the scraper. ODF is flat, readable XML:
+- text:h      : native heading with text:outline-level (strong signal)
+- text:p      : paragraph (text:span with styles -> bold/underline)
+- table:table : table with number-columns/rows-spanned + covered-table-cell
+- text:list   : lists (items marked is_list)
 - draw:frame  : images (draw:image @xlink:href = media/...)
 
-Retourne le même modèle de blocs que extract_word / extract_slides.
+Returns the same block model as extract word / slides.
 """
 import io
 import zipfile
@@ -43,8 +43,9 @@ class _Ns:
 def _style_map(zf: zipfile.ZipFile, content_root: etree._Element, ns: _Ns,
                parser: etree.XMLParser) -> dict:
     """
-    style-name -> {'bold': bool, 'underline': bool, 'size_pt': float|None}
-    pour les styles de texte (content.xml automatic-styles + styles.xml).
+    style-name -> {'bold': bool, 'underline': bool, 'size_pt': float|None,
+    'outline': int|None} for text styles (content.xml automatic-styles
+    + styles.xml).
     """
     out = {}
 
@@ -55,7 +56,7 @@ def _style_map(zf: zipfile.ZipFile, content_root: etree._Element, ns: _Ns,
             name = st.get(ns.q("style", "name"))
             if name is None:
                 continue
-            entry = out.setdefault(name, {"bold": False, "underline": False, "size_pt": None})
+            entry = out.setdefault(name, {"bold": False, "underline": False, "size_pt": None, "outline": None})
             fw = st.find(ns.q("fo", "font-weight"))
             if fw is not None and fw.get("text") in ("bold", "bolder"):
                 entry["bold"] = True
@@ -69,12 +70,18 @@ def _style_map(zf: zipfile.ZipFile, content_root: etree._Element, ns: _Ns,
                     entry["size_pt"] = float(v[:-2]) if v.endswith("pt") else float(v) / 20.0
                 except ValueError:
                     pass
-        # les styles de texte ODF sont des <text:style> (pas style:style)
+            pp = st.find(ns.q("style", "paragraph-properties"))
+            if pp is not None and pp.get(ns.q("text", "outline-level")):
+                try:
+                    entry["outline"] = int(pp.get(ns.q("text", "outline-level")))
+                except ValueError:
+                    pass
+        # ODF text styles are <text:style> (not style:style)
         for st in el.iter(ns.q("text", "style")):
             name = st.get(ns.q("style", "name"))
             if name is None:
                 continue
-            entry = out.setdefault(name, {"bold": False, "underline": False, "size_pt": None})
+            entry = out.setdefault(name, {"bold": False, "underline": False, "size_pt": None, "outline": None})
             fw = st.find(ns.q("fo", "font-weight"))
             if fw is not None and fw.get("text") in ("bold", "bolder"):
                 entry["bold"] = True
@@ -118,7 +125,7 @@ def _para_block(ns: _Ns, el: etree._Element, style_map: dict,
     letters = [c for c in text if c.isalpha()]
     caps_frac = sum(1 for c in letters if c.isupper()) / len(letters) if letters else 0.0
 
-    # taille : style du paragraphe, sinon médiane des spans
+    # size: paragraph style, otherwise the span median is not available here
     size_pt = None
     st = style_map.get(pstyle)
     if st and st["size_pt"]:
@@ -169,7 +176,7 @@ def _table_block(ns: _Ns, tbl: etree._Element) -> dict:
         grid.append(row_text)
         spans.append(row_span)
         vmerge.append(row_rs)
-    # n_cols : nombre max d'éléments de ligne (les covered cells occupent une colonne)
+    # n_cols: max number of row elements (covered cells occupy a column)
     n_cols = max((len(r) for r in grid), default=0)
     return {
         "type": "table",
@@ -203,11 +210,11 @@ def _figures_in(ns: _Ns, el: etree._Element, zf: zipfile.ZipFile) -> list:
 
 def extract_odf(data: bytes) -> dict:
     """
-    Retourne {"blocks", "info", "zf"} (même forme qu'extract_docx).
+    Returns {"blocks", "info", "zf"} (same shape as extract_docx).
     """
     zf = zipfile.ZipFile(io.BytesIO(data))
-    # Parsing tolérant : certains ODF ont des xml:id invalides (NCName)
-    # qui font échouer un parse strict.
+    # Tolerant parsing: some ODF files have invalid xml:id (NCName) that
+    # make a strict parse fail.
     parser = etree.XMLParser(recover=True, huge_tree=True)
     root = etree.fromstring(zf.read("content.xml"), parser)
     ns = _Ns(root.nsmap or {})
@@ -215,7 +222,7 @@ def extract_odf(data: bytes) -> dict:
 
     body = root.find(f"{ns.q('office','body')}/{ns.q('office','text')}")
     if body is None:
-        raise ValueError("content.xml sans office:text (fichier ODF non textuel ?)")
+        raise ValueError("content.xml has no office:text (non-textual ODF file?)")
 
     blocks = []
     n_figs = 0
@@ -231,7 +238,11 @@ def extract_odf(data: bytes) -> dict:
                     lvl = 1
                 blocks.append(_para_block(ns, child, style_map, False, lvl))
             elif tag == ns.q("text", "p"):
-                blocks.append(_para_block(ns, child, style_map, in_list, None))
+                # some documents do not use text:h at all: the level is
+                # carried by the paragraph style (paragraph-properties
+                # text:outline-level in styles.xml / automatic-styles).
+                st = style_map.get(child.get(ns.q("text", "style-name")) or "")
+                blocks.append(_para_block(ns, child, style_map, in_list, st.get("outline") if st else None))
             elif tag == ns.q("text", "list"):
                 walk(child, True)
             elif tag == ns.q("text", "list-item"):
@@ -240,11 +251,11 @@ def extract_odf(data: bytes) -> dict:
                 blocks.append(_table_block(ns, child))
             elif tag == ns.q("draw", "page"):
                 walk(child, in_list)
-            # draw:frame et autres : ignorés ici (images prises globalement)
+            # draw:frame and others: ignored here (images collected globally)
 
     walk(body, False)
 
-    # images du document (position non fiable : rangées après, comme pour PDF)
+    # document images (unreliable position: appended at the end, like for PDF)
     figures = _figures_in(ns, body, zf)
 
     return {

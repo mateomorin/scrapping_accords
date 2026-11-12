@@ -1,33 +1,38 @@
 """
-Step 1 - Inventaire et profilage du sous-ensemble (AUCUN LLM).
+Step 1 - Inventory and profiling of the subset (NO LLM).
 
-- TOUS les documents : détection du format réel par magic bytes (lecture des
-  4 premiers Ko seulement) + vérification d'existence du fichier.
-- Un ÉCHANTILLON (par défaut 300, --sample) : téléchargement complet et
-  profilage XML (objets OLE, tableaux, images, pages PDF, ...).
+- ALL documents: real format detection by magic bytes (only the first 4 KiB
+  are read) + file existence check.
+- A SAMPLE (default 300, --sample): full download and XML profiling
+  (OLE objects, tables, images, PDF pages, ...).
 
-Écrit (zone autorisée) : logs/profile_subset.parquet
+Writes (authorized zone): logs/profile_subset.parquet
 
-Lancement :
-    uv run src/data_conversion/heures_supp/step1_profile.py
-    uv run src/data_conversion/heures_supp/step1_profile.py --sample 500 --seed 7
+Run:
+    uv run src/data_conversion/heures_supp/steps/step1_profile.py
+    uv run src/data_conversion/heures_supp/steps/step1_profile.py --sample 500 --seed 7
 """
 import argparse
 import logging
+import os
+import sys
 from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
 
-import config
-import utils
-from utils import download_bytes, head_bytes, sniff_format
+# Make the heures_supp package importable when run as a script
+# (package root: src/data_conversion; no package install needed).
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
+from heures_supp.core import config, utils  # noqa: E402
+from heures_supp.core.utils import download_bytes, head_bytes, sniff_format  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 
 def quick_format(row) -> dict:
-    """Format réel (magic bytes sur 64 Ko) + existence."""
+    """Real format (magic bytes on 64 KiB) + existence."""
     head = head_bytes(row["docx_path"], 65536)
     if head is None or len(head) == 0:
         return {"exists": False, "format": "missing", "size_head": 0}
@@ -35,7 +40,7 @@ def quick_format(row) -> dict:
 
 
 def deep_profile(row) -> dict:
-    """Profilage XML complet (nécessite le téléchargement du fichier)."""
+    """Full XML profiling (requires downloading the file)."""
     out = {"exists": True}
     data = download_bytes(row["docx_path"])
     if data is None:
@@ -45,7 +50,7 @@ def deep_profile(row) -> dict:
     out["size_bytes"] = len(data)
     try:
         if fmt == "docx":
-            import extract_word
+            from heures_supp.core.extract import word as extract_word
 
             doc = extract_word.extract_docx(data)
             blocks = doc["blocks"]
@@ -62,7 +67,7 @@ def deep_profile(row) -> dict:
                 "n_hf_images": doc["info"]["n_header_footer_images"],
             })
         elif fmt == "pptx":
-            import extract_slides
+            from heures_supp.core.extract import slides as extract_slides
 
             ppt = extract_slides.extract_ppt(data)
             n_paras = sum(
@@ -83,7 +88,7 @@ def deep_profile(row) -> dict:
                 "n_slide_figs": n_figs,
             })
         elif fmt == "pdf":
-            import extract_pdf
+            from heures_supp.core.extract import pdf as extract_pdf
 
             pdf = extract_pdf.extract_pdf(data)
             out.update({
@@ -94,38 +99,38 @@ def deep_profile(row) -> dict:
                 "n_images": len(pdf["images"]),
             })
         elif fmt in ("rtf", "html"):
-            out["n_paras"] = len(data) // 100  # indicatif seulement
+            out["n_paras"] = len(data) // 100  # indicative only
     except Exception as e:
         out["profile_error"] = f"{type(e).__name__}: {e}"
     return out
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Step 1 : profilage du sous-ensemble")
+    parser = argparse.ArgumentParser(description="Step 1: subset profiling")
     parser.add_argument("--sample", type=int, default=300,
-                        help="Taille de l'échantillon pour le profilage complet (défaut 300)")
+                        help="Sample size for the full profiling (default 300)")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
     sel = pd.read_parquet(config.SELECTION_FILE, filesystem=config.fs)
-    logger.info(f"{len(sel)} documents à inventorier")
+    logger.info(f"{len(sel)} documents to inventory")
 
-    # 1) Format réel + existence (tous les documents, 4 Ko chacun)
-    logger.info("Détection des formats (magic bytes)...")
+    # 1) Real format + existence (all documents, 4 KiB each)
+    logger.info("Detecting formats (magic bytes)...")
     with ThreadPoolExecutor(max_workers=16) as ex:
         quick = list(ex.map(quick_format, sel.to_dict("records")))
     qdf = pd.DataFrame(quick)
     df = pd.concat([sel[["cid", "docx_path"]].reset_index(drop=True), qdf], axis=1)
-    logger.info("Distribution des formats :")
+    logger.info("Format distribution:")
     logger.info(df["format"].value_counts().to_string())
     n_missing = int((df["format"] == "missing").sum())
     if n_missing:
-        logger.warning(f"{n_missing} fichiers introuvables dans {config.DOCUMENTS_PATH}")
+        logger.warning(f"{n_missing} files not found in {config.DOCUMENTS_PATH}")
 
-    # 2) Profilage complet d'un échantillon
+    # 2) Full profiling of a sample
     n_sample = min(args.sample, len(df))
     sample = df.sample(n=n_sample, random_state=args.seed).reset_index(drop=True)
-    logger.info(f"Profilage complet de l'échantillon ({n_sample} documents)...")
+    logger.info(f"Full profiling of the sample ({n_sample} documents)...")
     with ThreadPoolExecutor(max_workers=8) as ex:
         deep = list(ex.map(deep_profile, sample.to_dict("records")))
     ddf = pd.DataFrame(deep)
@@ -138,13 +143,13 @@ def main():
     )
     ok = utils.put_parquet(out, config.PROFILE_FILE)
     if not ok:
-        raise SystemExit(f"Écriture impossible : {config.PROFILE_FILE}")
-    logger.info(f"Profil écrit : {config.PROFILE_FILE}")
+        raise SystemExit(f"Could not write: {config.PROFILE_FILE}")
+    logger.info(f"Profile written: {config.PROFILE_FILE}")
 
-    # Résumé de l'échantillon
+    # sample summary
     for col in ["n_ole", "n_ppt_embed", "n_tables", "n_media", "n_pages", "scanned"]:
         if col in out.columns and out[col].notna().any():
-            logger.info(f"  {col}: moyenne={out[col].mean():.2f} max={out[col].max()}")
+            logger.info(f"  {col}: mean={out[col].mean():.2f} max={out[col].max()}")
 
 
 if __name__ == "__main__":

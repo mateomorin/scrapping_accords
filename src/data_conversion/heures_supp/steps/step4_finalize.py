@@ -1,23 +1,28 @@
 """
-Step 4 - Finalisation : fusion OCR + sorties consommables par le RAG.
+Step 4 - Finalization: OCR merge + RAG-consumable outputs.
 
-Lit les shards step 2 et data/ocr_results.jsonl, puis écrit :
-  data/final_shard_XXXXX.parquet  : record complet par document (figures avec ocr_md)
-  data/chunks.jsonl               : chunks de sections + TOC + préambule + signature
-  data/tables.jsonl               : objets tableau (grille structurée + md)
-  logs/summary.json               : statistiques globales
+Reads the step 2 shards and data/ocr_results.jsonl, then writes:
+  data/final_shard_XXXXX.parquet  : full record per document (figures with ocr_md)
+  data/chunks.jsonl               : section chunks + TOC + preamble + signature
+  data/tables.jsonl               : table objects (structured grid + md)
+  logs/summary.json               : global statistics
 
-Lancement :
-    uv run src/data_conversion/heures_supp/step4_finalize.py
+Run:
+    uv run src/data_conversion/heures_supp/steps/step4_finalize.py
 """
 import json
 import logging
+import os
+import sys
 from collections import Counter
 
 import pandas as pd
 
-import config
-import utils
+# Make the heures_supp package importable when run as a script
+# (package root: src/data_conversion; no package install needed).
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
+from heures_supp.core import config, utils  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -29,7 +34,7 @@ SUMMARY_FILE = config.LOGS_PATH + "summary.json"
 
 
 def load_ocr_results() -> dict:
-    """fig_ref -> (ocr_md, ok) ; le dernier résultat ok gagne."""
+    """fig_ref -> (ocr_md, ok); the last successful result wins."""
     out = {}
     for r in utils.read_jsonl(config.DATA_PATH + "ocr_results.jsonl"):
         if r.get("ok"):
@@ -118,7 +123,7 @@ def build_tables(rec: dict) -> list:
     for t in rec.get("tables", []):
         sec = t.get("section")
         if sec == "root":
-            sec_title = "(préambule / hors section)"
+            sec_title = "(preamble / out of section)"
         elif sec == "signature":
             sec_title = "(signature)"
         else:
@@ -148,10 +153,10 @@ def build_tables(rec: dict) -> list:
 
 def main():
     ocr = load_ocr_results()
-    logger.info(f"{len(ocr)} résultats OCR chargés")
+    logger.info(f"{len(ocr)} OCR results loaded")
 
     shards = list_shards()
-    logger.info(f"{len(shards)} shards step 2 à finaliser : {shards}")
+    logger.info(f"{len(shards)} step 2 shards to finalize: {shards}")
 
     n_docs = n_chunks = n_tables = 0
     fmt_counts = Counter()
@@ -191,7 +196,7 @@ def main():
                     f["ocr_md"] = None
                     f["ocr_ok"] = False
                     ocr_err += 1
-            # PDF scannés : ocr complet rattaché au doc
+            # scanned PDFs: full OCR attached to the document
             if rec.get("doc_type") == "pdf_scanned":
                 ref = f"{rec['cid']}:FULL"
                 if ref in ocr:
@@ -224,17 +229,17 @@ def main():
 
         fdf = pd.DataFrame(final_rows)
         if not utils.put_parquet(fdf, final_shard_path(idx)):
-            raise RuntimeError(f"Écriture impossible : {final_shard_path(idx)}")
+            raise RuntimeError(f"Could not write: {final_shard_path(idx)}")
         n_chunks += len(all_chunks)
-        logger.info(f"final_shard_{idx:05d} écrit ({len(fdf)} documents)")
+        logger.info(f"final_shard_{idx:05d} written ({len(fdf)} documents)")
 
-    # chunks + tables (fichiers complets, reconstruits à chaque run)
+    # chunks + tables (full files, rebuilt on every run)
     n_chunks = len(all_chunks)
     n_tables = len(all_tables)
     if not utils.write_jsonl(CHUNKS_FILE, all_chunks):
-        raise RuntimeError(f"Écriture impossible : {CHUNKS_FILE}")
+        raise RuntimeError(f"Could not write: {CHUNKS_FILE}")
     if not utils.write_jsonl(TABLES_FILE, all_tables):
-        raise RuntimeError(f"Écriture impossible : {TABLES_FILE}")
+        raise RuntimeError(f"Could not write: {TABLES_FILE}")
 
     summary = {
         "n_documents": n_docs,
@@ -251,10 +256,10 @@ def main():
         },
     }
     if not utils.put_bytes(SUMMARY_FILE, json.dumps(summary, ensure_ascii=False, indent=2).encode()):
-        raise RuntimeError(f"Écriture impossible : {SUMMARY_FILE}")
+        raise RuntimeError(f"Could not write: {SUMMARY_FILE}")
 
     logger.info(json.dumps(summary, ensure_ascii=False, indent=2))
-    logger.info("Step 4 terminée.")
+    logger.info("Step 4 done.")
 
 
 if __name__ == "__main__":

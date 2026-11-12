@@ -1,28 +1,33 @@
 """
 Step 5 - Validation.
 
-- Affiche un rapport par document échantillonné : arborescence de sections
-  (niveau / confiance / numéro), échantillon de tableaux, décisions de
-  triage des figures, erreurs.
-- Option --compare : mesure le taux de recouvrement token entre notre texte
-  reconstruit (sections + tableaux) et l'ancienne sortie LLM présente dans
-  s3://mateomorin/legifrance/full_data/data/ (lecture seule).
-- Écrit logs/validation_report.json
+- Prints a per-document report for the sampled documents: section tree
+  (level / confidence / number), a table sample, the figure triage
+  decisions, errors.
+- Option --compare: measures the token-overlap rate between our
+  reconstructed text (sections + tables) and the old LLM output present in
+  s3://mateomorin/legifrance/full_data/data/ (read-only).
+- Writes logs/validation_report.json
 
-Lancement :
-    uv run src/data_conversion/heures_supp/step5_validate.py --limit 3
-    uv run src/data_conversion/heures_supp/step5_validate.py --limit 5 --compare
+Run:
+    uv run src/data_conversion/heures_supp/steps/step5_validate.py --limit 3
+    uv run src/data_conversion/heures_supp/steps/step5_validate.py --limit 5 --compare
 """
 import argparse
 import json
 import logging
+import os
 import re
+import sys
 from collections import Counter
 
 import pandas as pd
 
-import config
-import utils
+# Make the heures_supp package importable when run as a script
+# (package root: src/data_conversion; no package install needed).
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
+from heures_supp.core import config, utils  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -33,7 +38,7 @@ REPORT_FILE = config.LOGS_PATH + "validation_report.json"
 
 
 def final_shards() -> list:
-    """Shards à lire : final_shard_* si la step 4 est passée, sinon shard_*."""
+    """Shards to read: final_shard_* if step 4 has run, otherwise shard_*."""
     try:
         files = config.fs.ls(config.DATA_PATH, detail=False)
     except (FileNotFoundError, IsADirectoryError):
@@ -65,11 +70,11 @@ def overlap_f1(a: str, b: str) -> float:
 
 def load_existing_markdown(cids: set, cid_year: dict | None = None) -> dict:
     """
-    cid -> markdown de l'ancienne conversion (lecture seule).
-    L'ancienne chaîne écrivait un dossier par lot de metadata
-    (full_data/data/acco_data_{ANNEE}/shard_*.parquet) : on lit d'abord
-    les dossiers correspondant à l'année de signature des cids échantillonnés,
-    puis on balaye le reste si nécessaire.
+    cid -> markdown of the old conversion (read-only).
+    The old chain wrote one directory per metadata batch
+    (full_data/data/acco_data_{YEAR}/shard_*.parquet): first the directories
+    matching the signature year of the sampled cids are read, then the rest
+    is scanned if needed.
     """
     out = {}
 
@@ -101,7 +106,7 @@ def load_existing_markdown(cids: set, cid_year: dict | None = None) -> dict:
         return out
     dirs = sorted({e.split("/")[-1] for e in entries if not e.endswith(".parquet")})
 
-    # 1) dossiers ciblés par année de signature
+    # 1) directories targeted by signature year
     if cid_year:
         years = {cid_year[c] for c in cids if c in cid_year and cid_year.get(c)}
         targeted = [
@@ -111,7 +116,7 @@ def load_existing_markdown(cids: set, cid_year: dict | None = None) -> dict:
         for d in targeted:
             scan_dir(d)
 
-    # 2) balayage du reste (si des cids ne sont pas trouvés)
+    # 2) scan the rest (if some cids are not found)
     for d in dirs:
         if len(out) >= len(cids):
             break
@@ -160,7 +165,7 @@ def report_doc(rec: dict, verbose: bool) -> dict:
         print(f"  ... +{len(rec['toc']) - 25} sections")
     if verbose and rec.get("tables"):
         t = rec["tables"][0]
-        print(f"  [tableau {t['id']} -> section {t['section']}] context: {t.get('context', '')[:80]}")
+        print(f"  [table {t['id']} -> section {t['section']}] context: {t.get('context', '')[:80]}")
         print("  " + "\n  ".join((t.get("md") or "").splitlines()[:8]))
     if verbose and rec.get("figures"):
         for f in rec["figures"][:6]:
@@ -168,24 +173,24 @@ def report_doc(rec: dict, verbose: bool) -> dict:
             print(f"  [fig {f['id']}] {f.get('fmt')} {f.get('size')}B "
                   f"origin={f.get('origin')} keep={tr.get('keep')} ({tr.get('reason')})")
     if rec.get("errors"):
-        print(f"  ERREURS: {rec['errors'][:3]}")
+        print(f"  ERRORS: {rec['errors'][:3]}")
     return out
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Step 5 : validation")
-    parser.add_argument("--limit", type=int, default=3, help="Nombre de documents à afficher")
+    parser = argparse.ArgumentParser(description="Step 5: validation")
+    parser.add_argument("--limit", type=int, default=3, help="Number of documents to display")
     parser.add_argument("--compare", action="store_true",
-                        help="Comparer avec l'ancienne sortie LLM (full_data)")
+                        help="Compare with the old LLM output (full_data)")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
     shards = final_shards()
     if not shards:
-        logger.error("Aucun shard trouvé (lancer step2, puis step4).")
+        logger.error("No shards found (run step 2, then step 4).")
         return
     df = load_records(shards)
-    logger.info(f"{len(df)} documents disponibles (shards: {len(shards)})")
+    logger.info(f"{len(df)} documents available (shards: {len(shards)})")
 
     sample = df.sample(n=min(args.limit, len(df)), random_state=args.seed)
     reports = []
@@ -201,9 +206,9 @@ def main():
                     cid_year[cid] = pd.to_datetime(ds).year
                 except Exception:
                     pass
-        logger.info(f"Chargement de l'ancienne conversion pour {len(cids)} cids...")
+        logger.info(f"Loading the old conversion for {len(cids)} cids...")
         existing = load_existing_markdown(cids, cid_year)
-        logger.info(f"{len(existing)} cids trouvés dans {EXISTING_DATA_PREFIX}")
+        logger.info(f"{len(existing)} cids found in {EXISTING_DATA_PREFIX}")
 
     for _, row in sample.iterrows():
         rec = json.loads(row["doc_json"])
@@ -212,7 +217,7 @@ def main():
             f1 = overlap_f1(doc_text(rec), existing[rec["cid"]])
             r["overlap_f1_vs_llm"] = round(f1, 4)
             f1s.append(f1)
-            print(f"  [compare] F1 tokens vs ancienne sortie LLM : {f1:.3f}")
+            print(f"  [compare] token F1 vs old LLM output: {f1:.3f}")
         reports.append(r)
 
     report = {
@@ -226,9 +231,9 @@ def main():
     }
     ok = utils.put_bytes(REPORT_FILE, json.dumps(report, ensure_ascii=False, indent=2).encode())
     if ok:
-        logger.info(f"Rapport écrit : {REPORT_FILE}")
-    logger.info(f"Synthèse : doc_types={report['doc_types']} formats={report['formats']} "
-                f"erreurs={report['n_with_error']}")
+        logger.info(f"Report written: {REPORT_FILE}")
+    logger.info(f"Summary: doc_types={report['doc_types']} formats={report['formats']} "
+                f"errors={report['n_with_error']}")
 
 
 if __name__ == "__main__":

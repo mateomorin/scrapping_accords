@@ -1,154 +1,219 @@
-# Pipeline "Heures supplémentaires" — extraction de structure
+# "Heures supplémentaires" pipeline — structure extraction
 
-Extraction **déterministe** (sans LLM) de la structure des accords du
-sous-ensemble **"Heures supplémentaires (contingent, majoration)"**, à partir
-des documents bruts déjà scrapés sur S3. Le LLM n'est utilisé que comme
-dernier recours : l'OCR des seules images que le triage heuristique juge
-utiles (tableaux / schémas), jamais sur les logos ou signatures.
+**Deterministic** (no LLM) extraction of the structure of the agreements in
+the **"Heures supplémentaires (contingent, majoration)"** subset, from the
+raw documents already scraped on S3. The LLM is used only as a last
+resort: OCR of the images that the heuristic triage deems useful (tables /
+charts), never on logos or signatures.
 
-Contrairement à l'ancienne chaîne (`transform_docx_to_md.py`), qui envoyait
-chaque page contenant une image dans un VLM, ce pipeline :
+Unlike the old chain (`transform_docx_to_md.py`), which sent every page
+containing an image to a VLM, this pipeline:
 
-- **détecte le format réel** des fichiers (magic bytes — l'extension `.docx`
-  posée par `scrap_texts.py` n'est pas trustée : certains fichiers sont des
-  PDF, RTF, ODF, ...),
-- **extrait le texte et les tableaux directement du XML** des docx, des
-  diapositives PowerPoint embarquées (les objets OLE
-  `word/embeddings/Microsoft_PowerPoint_SlideN.sldx`, qui sont le contenu
-  principal de beaucoup d'accords) et des ODF (`content.xml`) : sans perte,
-  sans OCR,
-- **récupère la structure** (sections / articles) par heuristiques
-  typographiques multi-signaux (les accords n'utilisent pas de styles de
-  titre : gras, CAPITALES, souligné, numérotation arabe/romaine/décimale/
-  lettres),
-- **triage les images** par heuristiques (zone, taille, format, hash
-  perceptuel) : seules les images "contenu" passent en OCR VLM (1 appel par
-  image, pas par page).
+- **detects the real format** of the files (magic bytes — the `.docx`
+  extension forced by `scrap_texts.py` is not trusted: some files are PDF,
+  RTF, ODF, ...),
+- **extracts text and tables directly from the XML** of the docx, of the
+  embedded PowerPoint slides (the OLE objects
+  `word/embeddings/Microsoft_PowerPoint_SlideN.sldx`, which are the main
+  content of many agreements) and of the ODF (`content.xml`): lossless,
+  no OCR,
+- **recovers the structure** (sections / articles) with multi-signal
+  typographic heuristics (the agreements do not use heading styles: bold,
+  CAPS, underline, arabic/roman/decimal/letter numbering),
+- **triages the images** with heuristics (zone, size, format, perceptual
+  hash): only "content" images go to VLM OCR (1 call per image, not per
+  page).
 
-**Sortie** : données structurées destinées au repo RAG (chunks de sections,
-objets tableaux, TOC par document). **Aucune logique de RAG ici.**
+**Output**: structured data for the RAG repo (section chunks, table
+objects, per-document TOC). **No RAG logic here.**
 
-## Sécurité S3
+## Code layout
 
-- **Lecture seule** : `s3://mateomorin/legifrance/metadata/` et
-  `s3://mateomorin/legifrance/documents/` (sources scrapées).
-- **Écriture** uniquement sous `s3://mateomorin/legifrance/data_heures_supp/`
-  (`data/` et `logs/`). Tout écriture en dehors est refusée par
+```
+heures_supp/
+├── __init__.py
+├── HEURES_SUPP.md          # this document (data contract)
+├── selftest.py             # local self-test (no S3, no VLM)
+├── core/                   # shared library (no CLI entry points)
+│   ├── config.py           # S3 paths, LLM settings, triage thresholds
+│   ├── utils.py            # safe S3 writes, sniffing, OCR, hashing
+│   ├── structure.py        # heading scoring + section tree (level rule)
+│   ├── triage.py           # heuristic image triage (no LLM)
+│   ├── doc_process.py      # per-document pipeline -> structured record
+│   └── extract/            # one deterministic extractor per format
+│       ├── word.py         # DOCX (zip/XML, embedded OLE objects)
+│       ├── slides.py       # .sldx / .pptx packages
+│       ├── odf.py          # ODF (content.xml)
+│       └── pdf.py          # PDF (pdfplumber + pypdf)
+└── steps/                  # CLI entry points (run directly)
+    ├── step0_select.py
+    ├── step1_profile.py
+    ├── step2_extract.py
+    ├── step3_ocr.py
+    ├── step4_finalize.py
+    └── step5_validate.py
+```
+
+The step scripts are run directly (no package install): each one
+bootstraps `src/data_conversion` on `sys.path` and imports
+`heures_supp.core.*`.
+
+## Structure: level rule
+
+Every paragraph accepted as a heading belongs to a **family**
+(`structure.py`) that fixes its **relative depth** (`base`):
+
+| Family | base | Examples |
+|---|---|---|
+| container | 0 | `TITRE I`, `CHAPITRE 2`, `PARTIE A`, `LIVRE`, `ANNEXE`, `EXPOSÉ DES MOTIFS` |
+| preamble / roman | 0 | `PREAMBULE`, `I-`, `II.` |
+| article | 1 (or number of dots + 1) | `Article 1`, `Article 5.1` → 2 |
+| decimal | number of dots + 1 | `1.` → 1, `11.3.2.1` → 4 |
+| letter | 2 | `A.`, `B)` |
+| plain (strong typo, no number) | 1 | CAPS + bold title |
+
+**Document offset**: if the document contains at least one accepted
+container title, `offset = 1`, otherwise `0`. Final level:
+
+```
+level = min(max(base + offset, 1), 5)
+```
+
+Reason: a `TITRE` has a **scope** — the articles that follow it belong to
+it. With the offset, `TITRE I` stays at L1 (base 0) and `Article 1` moves
+to L2 under its TITRE parent. Without any container in the document,
+`offset = 0` and the levels are **unchanged** compared to the base rule
+(invariance guarantee tested in the selftest).
+
+**Native levels**: if the format encodes an explicit level, it is used as
+is (no offset): Word `w:outlineLvl` (directly on the paragraph or carried
+by the `w:pStyle` style via `styles.xml`; 0-based in the source, stored
+1-based) and ODF `text:outline-level` (directly on `<text:h>` or carried
+by the paragraph style of `text:p` — the values observed in the corpus are
+1-based, never 0).
+
+## S3 safety
+
+- **Read-only**: `s3://mateomorin/legifrance/metadata/` and
+  `s3://mateomorin/legifrance/documents/` (the scraped sources).
+- **Write** only under `s3://mateomorin/legifrance/data_heures_supp/`
+  (`data/` and `logs/`). Any write outside is refused by
   `utils.safe_remote_path`.
 
-## Prérequis
+## Prerequisites
 
 ```bash
 pip install uv
-uv sync            # ajoute lxml, pdfplumber, pypdf, imagehash, striprtf
+uv sync            # adds lxml, pdfplumber, pypdf, imagehash, striprtf
 ```
 
-Environnement (`.env` ou variables) :
+Environment (`.env` or variables):
 
 | Variable | Usage |
 |---|---|
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` | S3 (auto-détectées) |
-| `LLM_API_URL` / `LLM_API_KEY` (ou `OPENAI_BASE_URL` / `OPENAI_API_KEY`) | OCR des images (step 3) |
-| `LLM_OCR_MODEL` (défaut `gemma4-26b-moe`) | modèle VLM d'OCR |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` | S3 (auto-detected) |
+| `LLM_API_URL` / `LLM_API_KEY` (or `OPENAI_BASE_URL` / `OPENAI_API_KEY`) | image OCR (step 3) |
+| `LLM_OCR_MODEL` (default `gemma4-26b-moe`) | OCR VLM model |
 
-## Les 5 steps
+## The 5 steps
 
-### Step 0 — Sélection
-
-```bash
-uv run src/data_conversion/heures_supp/step0_select.py
-```
-
-Lit tous les parquets de `metadata/`, déduplique par `cid`, filtre sur la
-colonne booléenne `Heures supplémentaires (contingent, majoration)`, et écrit
-`logs/selection.parquet` (cid, reference, dateSignature, `docx_path`, ...).
-
-### Step 1 — Inventaire / profilage (0 LLM)
+### Step 0 — Selection
 
 ```bash
-uv run src/data_conversion/heures_supp/step1_profile.py            # échantillon 300
-uv run src/data_conversion/heures_supp/step1_profile.py --sample 500 --seed 7
+uv run src/data_conversion/heures_supp/steps/step0_select.py
 ```
 
-- **tous** les documents : format réel (magic bytes sur 64 Ko — les noms de
-  parties du zip sont en clair et permettent d'identifier docx/pptx/ODF même
-  sur un extrait tronqué) + existence ;
-- **l'échantillon** : profilage XML complet (objets OLE, tableaux, images,
-  pages PDF, chars texte...).
+Reads every parquet in `metadata/`, deduplicates by `cid`, filters on the
+boolean column `Heures supplémentaires (contingent, majoration)`, and
+writes `logs/selection.parquet` (cid, reference, dateSignature,
+`docx_path`, ...).
 
-Sortie : `logs/profile_subset.parquet` + distribution affichée. C'est l'étape
-qui quantifie le coût OCR attendu avant de convertir quoi que ce soit.
-
-### Step 2 — Extraction de structure (0 LLM)
+### Step 1 — Inventory / profiling (0 LLM)
 
 ```bash
-uv run src/data_conversion/heures_supp/step2_extract.py             # tout le sous-ensemble
-uv run src/data_conversion/heures_supp/step2_extract.py --limit 30  # essai rapide
+uv run src/data_conversion/heures_supp/steps/step1_profile.py            # sample 300
+uv run src/data_conversion/heures_supp/steps/step1_profile.py --sample 500 --seed 7
 ```
 
-Pour chaque document : téléchargement, sniffing, extraction (docx — y
-compris les variantes d'espaces de noms et parties principales non
-standard — / diapositives PowerPoint embarquées / ODF / pdf / rtf / html),
-structure, triage des images. Les images conservées sont uploadées dans
-`data/figs/{cid}/`.
+- **all** documents: real format (magic bytes on 64 KiB — the zip part
+  names are stored in clear and allow identifying docx/pptx/ODF even on a
+  truncated head) + existence;
+- **the sample**: full XML profiling (OLE objects, tables, images, PDF
+  pages, text chars...).
 
-Sorties : `data/shard_XXXXX.parquet` (500 docs/shard, checkpoint : un shard
-n'est repris que s'il est incomplet — un essai `--limit` ne bloque pas la
-suite) + `data/figs/`.
+Output: `logs/profile_subset.parquet` + printed distribution. This is the
+step that quantifies the expected OCR cost before converting anything.
 
-### Step 3 — OCR des images conservées
+### Step 2 — Structure extraction (0 LLM)
 
 ```bash
-uv run src/data_conversion/heures_supp/step3_ocr.py                 # toute la file
-uv run src/data_conversion/heures_supp/step3_ocr.py --max-images 20 # essai
-uv run src/data_conversion/heures_supp/step3_ocr.py --ocr-scanned   # + PDF scannés (Docling VLM, lourd)
+uv run src/data_conversion/heures_supp/steps/step2_extract.py             # whole subset
+uv run src/data_conversion/heures_supp/steps/step2_extract.py --limit 30  # quick test
+uv run src/data_conversion/heures_supp/steps/step2_extract.py --force     # reprocess complete shards
 ```
 
-Un appel VLM **par image** (pas par page) via l'endpoint OpenAI-compatible.
-Avant l'envoi, chaque image passe une préparation déterministe
-(`utils.prepare_image_for_ocr`) : redimensionnement au-delà de 3200 px,
-ré-encodage JPEG/PNG, aplatissement de la transparence sur fond blanc —
-les VLM plafonnent la taille des images.
+For each document: download, sniffing, extraction (docx — including
+namespace variants and non-standard main parts — / embedded PowerPoint
+slides / ODF / pdf / rtf / html), structure, image triage. The kept images
+are uploaded to `data/figs/{cid}/`.
 
-Après l'envoi, le Markdown est nettoyé (`utils.clean_ocr_md`) : le VLM a
-tendance à rendre les logos en référence d'image Markdown avec des URL
-inventées ; on conserve la description (alt text) en citation, sans URL.
+Outputs: `data/shard_XXXXX.parquet` (500 docs/shard, checkpoint: a shard is
+reprocessed only if incomplete — a `--limit` test does not block later
+runs) + `data/figs/`.
 
-Reprise par `data/ocr_results.jsonl` : seuls les résultats **réussis**
-comptent comme faits ; une relance retente donc les échecs (retry interne
-3× sur erreur transitoire avant de déclarer l'échec). Les EMF/WMF sont
-rasterisés via ImageMagick si disponible, sinon marqués
-`rasterisation_emf_wmf_indisponible` (échec tracé, pas un crash).
-
-### Step 4 — Finalisation (sorties pour le RAG)
+### Step 3 — OCR of the kept images
 
 ```bash
-uv run src/data_conversion/heures_supp/step4_finalize.py
+uv run src/data_conversion/heures_supp/steps/step3_ocr.py                 # whole queue
+uv run src/data_conversion/heures_supp/steps/step3_ocr.py --max-images 20 # test
+uv run src/data_conversion/heures_supp/steps/step3_ocr.py --ocr-scanned   # + scanned PDFs (Docling VLM, heavy)
 ```
 
-Fusion OCR + écriture des sorties consommables :
+One VLM call **per image** (not per page) via the OpenAI-compatible
+endpoint. Before sending, each image goes through a deterministic
+preparation (`utils.prepare_image_for_ocr`): resize beyond 3200 px,
+JPEG/PNG re-encoding, flattening of transparency onto a white background —
+VLMs cap the image size.
 
-| Fichier | Contenu |
+After sending, the Markdown is cleaned (`utils.clean_ocr_md`): the VLM
+tends to render logos as Markdown image references with invented URLs; the
+description (alt text) is kept as a quote, without the URL.
+
+Resume via `data/ocr_results.jsonl`: only **successful** results count as
+done; a re-run therefore retries the failures (internal 3× retry on
+transient errors before declaring a failure). EMF/WMF are rasterized via
+ImageMagick if available, otherwise marked
+`emf_wmf_rasterizer_unavailable` (traced failure, not a crash).
+
+### Step 4 — Finalization (RAG outputs)
+
+```bash
+uv run src/data_conversion/heures_supp/steps/step4_finalize.py
+```
+
+OCR merge + writing of the consumable outputs:
+
+| File | Content |
 |---|---|
-| `data/final_shard_XXXXX.parquet` | record complet par document (JSON) |
-| `data/chunks.jsonl` | 1 chunk par section (+ TOC, préambule, signature par doc) |
-| `data/tables.jsonl` | 1 objet par tableau (grille structurée + rendu md) |
-| `logs/summary.json` | statistiques globales |
+| `data/final_shard_XXXXX.parquet` | full record per document (JSON) |
+| `data/chunks.jsonl` | 1 chunk per section (+ TOC, preamble, signature per doc) |
+| `data/tables.jsonl` | 1 object per table (structured grid + md rendering) |
+| `logs/summary.json` | global statistics |
 
 ### Step 5 — Validation
 
 ```bash
-uv run src/data_conversion/heures_supp/step5_validate.py --limit 3
-uv run src/data_conversion/heures_supp/step5_validate.py --limit 5 --compare
+uv run src/data_conversion/heures_supp/steps/step5_validate.py --limit 3
+uv run src/data_conversion/heures_supp/steps/step5_validate.py --limit 5 --compare
 ```
 
-Rapport par document échantillonné (arborescence avec confiances, tableaux,
-triage). `--compare` calcule le F1 de recouvrement token entre notre texte
-reconstruit et l'ancienne sortie LLM (`full_data/data/`, lecture seule).
+Per-document report for the sampled documents (tree with confidences,
+tables, triage). `--compare` computes the token-overlap F1 between our
+reconstructed text and the old LLM output (`full_data/data/`, read-only).
 
-## Schéma des données
+## Data schema
 
-Record par document (`doc_json`) :
+Record per document (`doc_json`):
 
 ```jsonc
 {
@@ -177,54 +242,62 @@ Record par document (`doc_json`) :
 }
 ```
 
-Chunk (`chunks.jsonl`) : `chunk_id` (`{cid}:TOC`, `{cid}:PREAMBLE`,
-`{cid}:S3`, `{cid}:SIGNATURE`), `cid`, `reference`, `doc_type`, `chunk_type`,
-+ pour les sections : `level`, `number`, `title`, `confidence`, `parent`,
-`body_md`, `table_ids`, `figure_ids`, `n_chars`.
+Chunk (`chunks.jsonl`): `chunk_id` (`{cid}:TOC`, `{cid}:PREAMBLE`,
+`{cid}:S3`, `{cid}:SIGNATURE`), `cid`, `reference`, `doc_type`,
+`chunk_type`, + for sections: `level`, `number`, `title`, `confidence`,
+`parent`, `body_md`, `table_ids`, `figure_ids`, `n_chars`.
 
-Tableau (`tables.jsonl`) : `table_id` (`{cid}:T1`), `section_id`,
-`section_title`, `context` (phrase précédente), `header`, `rows` (grille
-structurée), `spans` (merges colonnes/lignes), `md`.
+Table (`tables.jsonl`): `table_id` (`{cid}:T1`), `section_id`,
+`section_title`, `context` (previous sentence), `header`, `rows`
+(structured grid), `spans` (column/row merges), `md`.
 
-## Robustesse du parseur
+## Parser robustness
 
-Les documents bruts sont hétérogènes ; l'extractor gère :
+The raw documents are heterogeneous; the extractor handles:
 
-- **Variantes d'espaces de noms OOXML** : les URN sont résolues par
-  document à partir de la racine (`extract_word._Ns`) — certains éditeurs
-  émettent `purl.oclc.org` au lieu de `schemas.openxmlformats.org`.
-- **Partie principale non standard** : découverte via `_rels/.rels`
-  (type `officeDocument`) — certains fichiers ont `word/document2.xml`.
-- **XML malformé** : parsing en mode `recover` (caractères PCDATA invalides /
-  char. de contrôle).
-- **ODF (OpenDocument)** : `mimetype` + `content.xml` enregistrés en `.docx`.
-  Les titres natifs `<text:h text:outline-level="N">` sont utilisés comme
-  signal fort ; les tableaux `table:table` et images `draw:frame` sont extraits.
-- **Fichiers corrompus / vides** : signalés dans `error` (doc_type `error`),
-  sans bloquer le shard.
+- **OOXML namespace variants**: the URNs are resolved per document from
+  the root (`extract/word.py._Ns`) — some editors emit `purl.oclc.org`
+  instead of `schemas.openxmlformats.org`.
+- **Non-standard main part**: discovered via `_rels/.rels` (type
+  `officeDocument`) — some files have `word/document2.xml`.
+- **Malformed XML**: parsing in `recover` mode (invalid PCDATA chars /
+  control characters).
+- **ODF (OpenDocument)**: `mimetype` + `content.xml` saved as `.docx`.
+  The native headings `<text:h text:outline-level="N">` are used as a
+  strong signal; the `table:table` tables and `draw:frame` images are
+  extracted.
+- **Levels carried by styles**: when the document does not use `text:h` /
+  `w:outlineLvl` directly, the level is read from the paragraph style
+  (ODF `style:paragraph-properties text:outline-level` in `styles.xml` /
+  `automatic-styles`; Word `w:outlineLvl` in the `w:pStyle` of
+  `styles.xml`). The ODF values in the corpus are 1-based; the Word ones
+  (0-based) are converted to 1-based.
+- **Corrupted / empty files**: reported in `error` (doc_type `error`),
+  without blocking the shard.
 
-## Limites connues
+## Known limitations
 
-- **Titres** : la détection est heuristique (cf. `structure.py`). Chaque
-  section porte `confidence` et `evidence` ; les faux positifs possibles sont
-  limités par les règles (formules de chapeau, dates, bannières répétées...).
-  Aucun texte n'est perdu : la structure est un index au-dessus du contenu
-  ordonné.
-- **EMF/WMF** sans rasteriseur (ImageMagick) : l'image n'est pas OCR'de
-  (l'erreur est tracée). Pour les objets OLE **binaires** (`.ppt` legacy,
-  non `.sldx`), seule la prévisualisation EMF est disponible : elle est
-  mise en file d'OCR sous `origin=ole_preview`.
-- **PDF** : born-digital → texte + tables via pdfplumber ; scannés →
-  `doc_type=pdf_scanned`, à traiter avec `step3 --ocr-scanned` (Docling VLM,
-  même pipeline que l'ancienne chaîne).
-- Les images de PDF sont rangées en fin de document (pas de position fiable
-  dans le flux texte).
+- **Titles**: detection is heuristic (see `structure.py` and the
+  "Structure: level rule" section). Each section carries `confidence` and
+  `evidence`; possible false positives are limited by the rules (boilerplate
+  preamble formulas, dates, repeated banners...). No text is lost: the
+  structure is an index over the ordered content.
+- **EMF/WMF** without a rasterizer (ImageMagick): the image is not OCR'd
+  (the error is traced). For **binary** OLE objects (legacy `.ppt`, not
+  `.sldx`), only the EMF preview is available: it is queued for OCR under
+  `origin=ole_preview`.
+- **PDF**: born-digital → text + tables via pdfplumber; scanned →
+  `doc_type=pdf_scanned`, to be processed with `step3 --ocr-scanned`
+  (Docling VLM, same pipeline as the old chain).
+- PDF images are placed at the end of the document (no reliable position
+  in the text stream).
 
-## Auto-test local (sans S3)
+## Local self-test (no S3)
 
 ```bash
 uv run src/data_conversion/heures_supp/selftest.py
 ```
 
-Valide l'extractor sur `example_data/` (Word classique, Word + 42 slides PPT
-embarquées, docx corrompu, PDF).
+Validates the extractor on `example_data/` (classic Word, Word + 42
+embedded PPT slides, corrupted docx, PDF) plus synthetic documents for the
+TITRE/ARTICLE level hierarchy.

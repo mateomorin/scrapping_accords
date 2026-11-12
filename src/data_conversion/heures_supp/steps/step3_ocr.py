@@ -1,36 +1,39 @@
 """
-Step 3 - OCR LLM des images conservées par le triage (step 2).
+Step 3 - LLM OCR of the images kept by the triage (step 2).
 
-Un seul appel VLM par image (sur l'image elle-même, pas sur des pages PDF).
-Reprise : les figures déjà présentes dans data/ocr_results.jsonl ne sont
-jamais retraitées.
+One VLM call per image (on the image itself, not on PDF pages).
+Resume: figures already present in data/ocr_results.jsonl with a successful
+result are never reprocessed.
 
-Option --ocr-scanned : les PDF scannés (sans couche texte) sont passés dans
-le pipeline VLM Docling complet (chemin lourd, réservé au résidu).
+Option --ocr-scanned: scanned PDFs (no text layer) go through the full
+Docling VLM pipeline (heavy path, reserved for the residual).
 
-Sortie (zone autorisée) : data/ocr_results.jsonl
+Output (authorized zone): data/ocr_results.jsonl
   {fig_ref, cid, fig_id, ocr_md, model, ok, error, ts}
 
-Lancement :
-    uv run src/data_conversion/heures_supp/step3_ocr.py
-    uv run src/data_conversion/heures_supp/step3_ocr.py --max-images 20
-    uv run src/data_conversion/heures_supp/step3_ocr.py --ocr-scanned
+Run:
+    uv run src/data_conversion/heures_supp/steps/step3_ocr.py
+    uv run src/data_conversion/heures_supp/steps/step3_ocr.py --max-images 20
+    uv run src/data_conversion/heures_supp/steps/step3_ocr.py --ocr-scanned
 """
 import argparse
-import asyncio
 import json
 import logging
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 import pandas as pd
 
-import config
-import utils
+# Make the heures_supp package importable when run as a script
+# (package root: src/data_conversion; no package install needed).
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
+from heures_supp.core import config, utils  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -45,7 +48,7 @@ OCRABLE_EXT = {"png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "webp", "svg"}
 
 # ------------------------------------------------------------------- helpers
 def collect_queue(ocr_scanned: bool) -> list:
-    """Collecte la file d'OCR depuis les shards step 2."""
+    """Collect the OCR queue from the step 2 shards."""
     items = []
     try:
         shard_files = [
@@ -54,7 +57,7 @@ def collect_queue(ocr_scanned: bool) -> list:
             and "final_shard" not in f
         ]
     except (FileNotFoundError, IsADirectoryError):
-        logger.error(f"Aucun shard trouvé dans {config.DATA_PATH} (lancer step2 d'abord).")
+        logger.error(f"No shards found in {config.DATA_PATH} (run step 2 first).")
         return []
 
     for f in sorted(shard_files):
@@ -90,17 +93,17 @@ def collect_queue(ocr_scanned: bool) -> list:
 
 def done_refs() -> set:
     """
-    fig_refs traités avec succès. Les échecs (transitoires ou durables) ne
-    sont PAS marqués comme faits : une relance de step 3 retente les échecs
-    (les échecs durables type EMF sans rasteriseur sont peu coûteux).
+    fig_refs processed successfully. Failures (transient or permanent) are
+    NOT marked as done: a re-run of step 3 retries the failures (permanent
+    failures like EMF without a rasterizer are cheap).
     """
     return {r["fig_ref"] for r in utils.read_jsonl(OCR_RESULTS_FILE) if r.get("ok")}
 
 
 def rasterize_vector(data: bytes, ext: str):
     """
-    Tente de rasteriser un EMF/WMF via ImageMagick. Retourne (bytes, mime)
-    ou None si impossible (l'appelant signale alors un skip).
+    Try to rasterize an EMF/WMF via ImageMagick. Returns (bytes, mime) or
+    None if impossible (the caller then marks a skip).
     """
     bin_ = shutil.which("magick") or shutil.which("convert")
     if not bin_:
@@ -126,8 +129,8 @@ def rasterize_vector(data: bytes, ext: str):
 
 def ocr_pdf_scanned(docx_path: str) -> str:
     """
-    OCR complet d'un PDF scanné via le pipeline VLM Docling
-    (mêmes réglages que l'ancienne chaîne de conversion).
+    Full OCR of a scanned PDF via the Docling VLM pipeline (same settings
+    as the old conversion chain).
     """
     from docling.datamodel.base_models import InputFormat
     from docling.datamodel.pipeline_options import VlmConvertOptions, VlmPipelineOptions
@@ -137,7 +140,7 @@ def ocr_pdf_scanned(docx_path: str) -> str:
 
     raw = utils.download_bytes(docx_path)
     if raw is None:
-        raise RuntimeError("téléchargement du PDF impossible")
+        raise RuntimeError("could not download the PDF")
 
     engine_options = ApiVlmEngineOptions(
         runtime_type=VlmEngineType.API,
@@ -158,7 +161,7 @@ def ocr_pdf_scanned(docx_path: str) -> str:
             )
         }
     )
-    # docling attend un chemin (ou DocumentStream) : on passe par un fichier tmp
+    # docling expects a path (or DocumentStream): go through a temp file
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tf:
         tf.write(raw)
         tmp_path = tf.name
@@ -182,22 +185,22 @@ def ocr_one(item: dict, doc_paths: dict) -> dict:
         data = utils.download_bytes(item["fig_s3"])
         if data is None:
             return {**base, "ocr_md": None, "model": None,
-                    "ok": False, "error": "téléchargement image impossible", "ts": ts}
+                    "ok": False, "error": "image_download_failed", "ts": ts}
 
         ext = item["fmt"]
         if ext in ("emf", "wmf"):
             r = rasterize_vector(data, ext)
             if r is None:
                 return {**base, "ocr_md": None, "model": None,
-                        "ok": False, "error": "rasterisation_emf_wmf_indisponible", "ts": ts}
+                        "ok": False, "error": "emf_wmf_rasterizer_unavailable", "ts": ts}
             data, mime = r
         elif ext in MIME_BY_EXT:
             mime = MIME_BY_EXT[ext]
         else:
             return {**base, "ocr_md": None, "model": None,
-                    "ok": False, "error": f"format_image_non_ocrable:{ext}", "ts": ts}
+                    "ok": False, "error": f"image_format_not_ocrable:{ext}", "ts": ts}
 
-        # redimensionnement / ré-encodage déterministe avant envoi au VLM
+        # deterministic resize / re-encoding before sending to the VLM
         data, mime = utils.prepare_image_for_ocr(data, ext)
         md = utils.clean_ocr_md(utils.llm_ocr_image(data, mime))
         return {**base, "ocr_md": md, "model": config.LLM_MODEL,
@@ -208,14 +211,14 @@ def ocr_one(item: dict, doc_paths: dict) -> dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Step 3 : OCR des images conservées")
+    parser = argparse.ArgumentParser(description="Step 3: OCR of the kept images")
     parser.add_argument("--max-images", type=int, default=0,
-                        help="Nombre max d'appels OCR (0 = tous)")
+                        help="Max number of OCR calls (0 = all)")
     parser.add_argument("--ocr-scanned", action="store_true",
-                        help="Traiter aussi les PDF scannés via Docling (lourd)")
+                        help="Also process scanned PDFs via Docling (heavy)")
     args = parser.parse_args()
 
-    # chemin brut des documents (pour les PDF scannés)
+    # raw document paths (for the scanned PDFs)
     sel = pd.read_parquet(config.SELECTION_FILE, filesystem=config.fs)
     doc_paths = dict(zip(sel["cid"], sel["docx_path"]))
 
@@ -226,11 +229,11 @@ def main():
         todo = todo[: args.max_images]
 
     logger.info(
-        f"File d'OCR : {len(queue)} au total, {len(done)} déjà faits, "
-        f"{len(todo)} à traiter maintenant."
+        f"OCR queue: {len(queue)} total, {len(done)} already done, "
+        f"{len(todo)} to process now."
     )
     if not todo:
-        logger.info("Rien à faire.")
+        logger.info("Nothing to do.")
         return
 
     results = utils.read_jsonl(OCR_RESULTS_FILE)
@@ -246,10 +249,10 @@ def main():
                 n_err += 1
             if (i + 1) % CHECKPOINT_EVERY == 0 or i + 1 == len(todo):
                 if not utils.write_jsonl(OCR_RESULTS_FILE, results):
-                    raise RuntimeError(f"Écriture impossible : {OCR_RESULTS_FILE}")
-                logger.info(f"OCR : {i + 1}/{len(todo)} (ok={n_ok}, err={n_err})")
+                    raise RuntimeError(f"Could not write: {OCR_RESULTS_FILE}")
+                logger.info(f"OCR: {i + 1}/{len(todo)} (ok={n_ok}, err={n_err})")
 
-    logger.info(f"Step 3 terminée : {n_ok} OK, {n_err} erreurs. Sortie : {OCR_RESULTS_FILE}")
+    logger.info(f"Step 3 done: {n_ok} OK, {n_err} errors. Output: {OCR_RESULTS_FILE}")
 
 
 if __name__ == "__main__":

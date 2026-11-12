@@ -1,12 +1,12 @@
 """
-Extraction de texte / tableaux / images de PDF.
+Text / table / image extraction from PDF.
 
-- pdfplumber : texte ligne par ligne (avec fontname/taille pour les features
-  de détection de titre) + tables natives (PDF "born digital").
-- pypdf      : octets des images (pour le triage / OCR éventuel).
+- pdfplumber: text line by line (with fontname/size for the title-detection
+  features) + native tables ("born digital" PDFs).
+- pypdf     : image bytes (for the triage / potential OCR).
 
-Un PDF "scanné" (aucune couche texte) est détecté (scanned=True) : dans ce
-cas, seul le pipeline LLM complet (step 3, --ocr-scanned) peut l'exploiter.
+A "scanned" PDF (no text layer) is detected (scanned=True): in that case
+only the full LLM pipeline (step 3, --ocr-scanned) can exploit it.
 """
 import io
 

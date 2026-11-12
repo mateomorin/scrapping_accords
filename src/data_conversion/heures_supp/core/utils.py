@@ -1,6 +1,6 @@
 """
-Helpers partagés : écriture S3 sécurisée, sniffing de format, téléchargements,
-retours d'erreur, OCR LLM d'une image, hash perceptuel.
+Shared helpers: safe S3 writes, format sniffing, downloads, error handling,
+LLM OCR of a single image, perceptual hashing.
 """
 import base64
 import io
@@ -10,23 +10,23 @@ import re
 import time
 import zipfile
 
-import config
+from . import config
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------- S3 safety
 def safe_remote_path(path: str) -> str:
-    """Refuse tout chemin en dehors de la zone de sortie autorisée."""
+    """Refuse any path outside the authorized output zone."""
     if not path.startswith(config.OUTPUT_ROOT):
         raise PermissionError(
-            f"Refus d'écriture en dehors de {config.OUTPUT_ROOT!r}: {path!r}"
+            f"refusing write outside {config.OUTPUT_ROOT!r}: {path!r}"
         )
     return path
 
 
 def s3_write_with_retry(write_fn, description: str, *args, **kwargs) -> bool:
-    """Applique write_fn avec retries exponentiels. Ne lève jamais (sauf refus)."""
+    """Run write_fn with exponential backoff. Never raises (except refusal)."""
     last_exc = None
     for attempt in range(config.S3_WRITE_RETRIES):
         try:
@@ -36,11 +36,11 @@ def s3_write_with_retry(write_fn, description: str, *args, **kwargs) -> bool:
             last_exc = e
             wait = config.S3_WRITE_RETRY_BASE_DELAY * (2 ** attempt)
             logger.warning(
-                f"Échec écriture S3 ({description}), essai "
-                f"{attempt + 1}/{config.S3_WRITE_RETRIES} : {e}. Nouvel essai dans {wait}s."
+                f"S3 write failed ({description}), attempt "
+                f"{attempt + 1}/{config.S3_WRITE_RETRIES}: {e}. Retrying in {wait}s."
             )
             time.sleep(wait)
-    logger.error(f"Échec définitif d'écriture S3 ({description}) : {last_exc}")
+    logger.error(f"S3 write definitively failed ({description}): {last_exc}")
     return False
 
 
@@ -78,7 +78,7 @@ def read_jsonl(path: str) -> list:
         try:
             out.append(json.loads(line))
         except json.JSONDecodeError:
-            logger.warning(f"Ligne JSON illisible dans {path}, ignorée.")
+            logger.warning(f"Unreadable JSON line in {path}, ignored.")
     return out
 
 
@@ -91,14 +91,14 @@ def write_jsonl(path: str, records: list) -> bool:
 # ------------------------------------------------------------- format sniff
 def _zip_kind(data: bytes) -> str:
     """
-    docx/pptx/xlsx à partir des seuls premiers octets d'un zip.
+    docx/pptx/xlsx from the first bytes of a zip only.
 
-    Contrainte : zipfile a besoin de la table centrale (fin d'archive), donc
-    impossible sur un extrait tronqué. Astuce : les NOMS de parties des local
-    file headers sont stockés en clair dans le flux zip. On scanne donc les
-    signatures PK\x03\x04 et on lit les noms qui suivent ; les parties OOXML
-    apparaissent très tôt (word/*, ppt/*) après [Content_Types].xml et
-    _rels/.rels. Retourne "zip" si aucun nom caractéristique n'est visible.
+    Constraint: zipfile needs the central directory (end of archive), so it
+    cannot work on a truncated head. Trick: the NAMES of the local file
+    headers are stored in clear in the zip stream. We scan the PK\\x03\\x04
+    signatures and read the names that follow; OOXML parts appear very early
+    (word/*, ppt/*) right after [Content_Types].xml and _rels/.rels. Returns
+    "zip" when no characteristic name is visible.
     """
     pos, n = 0, len(data)
     while True:
@@ -111,12 +111,12 @@ def _zip_kind(data: bytes) -> str:
             continue
         name = data[i + 30 : i + 30 + fnlen].decode("utf-8", errors="replace").lower()
         if name == "mimetype":
-            # Première entrée d'un ODF, stockée sans compression : on peut
-            # lire le contenu (opendocument.text / .spreadsheet / .presentation)
-            # juste après l'en-tête local.
+            # First entry of an ODF, stored uncompressed: its content
+            # (opendocument.text / .spreadsheet / .presentation) can be read
+            # right after the local header.
             method = int.from_bytes(data[i + 8 : i + 10], "little")
             if method == 0:
-                # local header : csize @18, extralen @28 (offsets ZIP standard)
+                # local header: csize @18, extralen @28 (standard ZIP offsets)
                 csize = int.from_bytes(data[i + 18 : i + 22], "little")
                 extralen = int.from_bytes(data[i + 28 : i + 30], "little")
                 start = i + 30 + fnlen + extralen
@@ -134,22 +134,22 @@ def _zip_kind(data: bytes) -> str:
         if name.startswith("xl/"):
             return "xlsx"
         pos = i + 30 + fnlen
-        if pos - i > 4096:  # en-tête suspectement gros : on passe au suivant
+        if pos - i > 4096:  # suspiciously large header: move on
             pos = i + 4
     return "zip"
 
 
 def sniff_format(data: bytes) -> str:
     """
-    Détecte le format réel d'un document à partir des magic bytes.
-    L'extension du fichier n'est JAMAIS trustée (scrap_texts.py force .docx).
-    Retourne un de: docx, pptx, xlsx, pdf, rtf, html, zip, unknown.
+    Detect the real format of a document from its magic bytes.
+    The file extension is NEVER trusted (scrap_texts.py forces .docx).
+    Returns one of: docx, pptx, xlsx, pdf, rtf, html, zip, unknown.
     """
     if data[:4] == b"PK\x03\x04":
         kind = _zip_kind(data)
         if kind != "zip":
             return kind
-        # Extrait tronqué sans nom caractéristique : on tente le zip complet.
+        # Truncated head without a characteristic name: try the full zip.
         try:
             with zipfile.ZipFile(io.BytesIO(data)) as z:
                 names = set(z.namelist())
@@ -180,15 +180,15 @@ def download_bytes(remote_path: str, max_retries: int = 3) -> bytes | None:
             return config.fs.cat_file(remote_path)
         except Exception as e:
             logger.warning(
-                f"Téléchargement échoué {remote_path} "
-                f"(essai {attempt + 1}/{max_retries}) : {e}"
+                f"Download failed {remote_path} "
+                f"(attempt {attempt + 1}/{max_retries}): {e}"
             )
             time.sleep(2 * (attempt + 1))
     return None
 
 
 def head_bytes(remote_path: str, n: int = 4096) -> bytes | None:
-    """Premiers n octets (sniffing sans télécharger le fichier entier)."""
+    """First n bytes (sniffing without downloading the whole file)."""
     try:
         return config.fs.cat_file(remote_path, start=0, end=n)
     except Exception:
@@ -213,7 +213,7 @@ def get_llm_client():
 
     if not config.LLM_API_URL or not config.LLM_API_KEY:
         raise RuntimeError(
-            "LLM_API_URL/LLM_API_KEY (ou OPENAI_BASE_URL/OPENAI_API_KEY) non définis."
+            "LLM_API_URL/LLM_API_KEY (or OPENAI_BASE_URL/OPENAI_API_KEY) not set."
         )
     if _llm_client is None:
         _llm_client = OpenAI(base_url=config.LLM_API_URL, api_key=config.LLM_API_KEY)
@@ -223,9 +223,9 @@ def get_llm_client():
 def llm_ocr_image(image_bytes: bytes, mime: str, model: str | None = None,
                   max_attempts: int = 3) -> str:
     """
-    Un seul appel OCR/description sur une image (endpoint OpenAI-compatible).
-    Retry interne sur erreur transitoire (réseau, 5xx) ; lève la dernière
-    erreur après max_attempts tentatives.
+    A single OCR/description call for one image (OpenAI-compatible endpoint).
+    Internal retry on transient errors (network, 5xx); raises the last error
+    after max_attempts attempts.
     """
     client = get_llm_client()
     b64 = base64.b64encode(image_bytes).decode()
@@ -254,8 +254,8 @@ def llm_ocr_image(image_bytes: bytes, mime: str, model: str | None = None,
             last_err = e
             wait = 5 * (attempt + 1)
             logger.warning(
-                f"OCR LLM essai {attempt + 1}/{max_attempts} échoué : {e} "
-                f"-> nouvelle tentative dans {wait}s"
+                f"OCR LLM attempt {attempt + 1}/{max_attempts} failed: {e} "
+                f"-> retrying in {wait}s"
             )
             time.sleep(wait)
     raise last_err
@@ -264,9 +264,9 @@ def llm_ocr_image(image_bytes: bytes, mime: str, model: str | None = None,
 # ------------------------------------------------------------- image prepare
 _RE_MD_IMG = re.compile(r"!\[([^\]]*)\]\(([^)]*)\)")
 _RE_URL_ONLY_LINE = re.compile(r"^\s*https?://\S+\s*$")
-# Liens Markdown avec URL inventée par le VLM (vide, example.com, ou le
-# domaine replicate.delivery qui apparaît dans les hallucinations) :
-# on garde le texte, on supprime l'URL.
+# Markdown links with a URL invented by the VLM (empty, example.com, or the
+# replicate.delivery domain that shows up in hallucinations): keep the text,
+# drop the URL.
 _RE_FAKE_LINK = re.compile(
     r"\[([^\]]*)\]\((?:https?://(?:[^\)]*example[^\)]*|[^\)]*replicate\.delivery[^\)]*|))\)"
 )
@@ -274,13 +274,13 @@ _RE_FAKE_LINK = re.compile(
 
 def clean_ocr_md(md: str) -> str:
     """
-    Nettoyage déterministe du Markdown produit par le VLM :
-    - référence d'image `![alt](url)` (le modèle rend les logos avec des
-      URL inventées) -> citation `> [Image : alt]` sans URL ;
-    - lignes ne contenant qu'une URL : supprimées (les URLs au milieu du
-      texte sont conservées, prudence) ;
-    - lien Markdown `[texte](url_inventée)` (URL vide, example.com,
-      replicate.delivery) : on garde le texte, on supprime l'URL.
+    Deterministic cleaning of the Markdown produced by the VLM:
+    - image references `![alt](url)` (the model renders logos with invented
+      URLs) -> quote `> [Image : alt]` without URL;
+    - lines containing only a URL: removed (URLs in the middle of text are
+      kept, cautiously);
+    - Markdown link `[text](invented_url)` (empty URL, example.com,
+      replicate.delivery): keep the text, drop the URL.
     """
     if not md:
         return md
@@ -295,11 +295,11 @@ def clean_ocr_md(md: str) -> str:
 
 def prepare_image_for_ocr(data: bytes, ext: str) -> tuple[bytes, str]:
     """
-    Préparation déterministe d'une image avant envoi au VLM :
-    - redimensionne les très grandes images (les VLM plafonnent la taille),
-    - ré-encode (JPEG q85 / PNG) pour rester sous quelques Mo,
-    - aplatie la transparence sur fond blanc.
-    Retourne (bytes, mime) ; en cas d'erreur, retourne l'image d'origine.
+    Deterministic image preparation before sending to the VLM:
+    - resizes very large images (VLMs cap image size),
+    - re-encodes (JPEG q85 / PNG) to stay under a few MB,
+    - flattens transparency onto a white background.
+    Returns (bytes, mime); on error, returns the original image.
     """
     mime = MIME_BY_EXT.get(ext)
     if mime is None or ext not in {"png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "webp"}:
@@ -316,7 +316,7 @@ def prepare_image_for_ocr(data: bytes, ext: str) -> tuple[bytes, str]:
         if max_dim > 3200:
             scale = 3200 / max_dim
             img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
-        # transparence -> fond blanc
+        # transparency -> white background
         if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
             rgba = img.convert("RGBA")
             bg = Image.new("RGB", rgba.size, (255, 255, 255))
@@ -333,7 +333,7 @@ def prepare_image_for_ocr(data: bytes, ext: str) -> tuple[bytes, str]:
 
 # ------------------------------------------------------------- image hashing
 def perceptual_hash(image_bytes: bytes):
-    """Hash perceptuel (pHash) d'une image PIL-ouverte, ou None si illisible."""
+    """Perceptual hash (pHash) of a PIL-openable image, or None if unreadable."""
     try:
         import imagehash
         from PIL import Image

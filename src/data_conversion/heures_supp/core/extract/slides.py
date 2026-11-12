@@ -1,12 +1,12 @@
 """
-Extraction de texte / tableaux / images d'un package PowerPoint embarqué :
-- .sldx  : package à diapositive unique (cas typique des objets OLE dans les
-           docx ACCO : word/embeddings/Microsoft_PowerPoint_SlideN.sldx)
-- .pptx  : présentation classique multi-diapositives
+Text / table / image extraction from an embedded PowerPoint package:
+- .sldx  : single-slide package (the typical case of OLE objects in the
+           ACCO docx: word/embeddings/Microsoft_PowerPoint_SlideN.sldx)
+- .pptx  : classic multi-slide presentation
 
-Le texte est récupéré directement du XML (a:t), sans OCR : c'est sans perte
-et gratuit. Les tableaux PowerPoint (a:tbl) sont de vraies grilles avec
-merges (gridSpan / rowSpan).
+The text is recovered directly from the XML (a:t), without OCR: it is
+lossless and free. PowerPoint tables (a:tbl) are real grids with merges
+(gridSpan / rowSpan).
 """
 import io
 import zipfile
@@ -16,8 +16,8 @@ A = "http://schemas.openxmlformats.org/drawingml/2006/main"
 P = "http://schemas.openxmlformats.org/presentationml/2006/main"
 R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
-# réutilise parse_rels de extract_word (même structure de rels OOXML)
-from extract_word import parse_rels
+# reuses parse_rels from the word module (same OOXML rels structure)
+from .word import parse_rels
 
 
 def _q(nsmap: dict, prefix: str, tag: str) -> str:
@@ -28,7 +28,7 @@ def _q(nsmap: dict, prefix: str, tag: str) -> str:
 
 
 def _slide_order(zf: zipfile.ZipFile) -> list:
-    """Ordre des parties de diapositives dans le package."""
+    """Order of the slide parts in the package."""
     names = set(zf.namelist())
     if "ppt/presentation.xml" in names:
         pres = etree.fromstring(zf.read("ppt/presentation.xml"))
@@ -40,7 +40,7 @@ def _slide_order(zf: zipfile.ZipFile) -> list:
                 target = rels[rid]["target"].lstrip("/")
                 order.append(target if target.startswith("ppt/") else "ppt/" + target)
         return order
-    # package à diapositive unique (.sldx) : ppt/slides/slide1.xml
+    # single-slide package (.sldx): ppt/slides/slide1.xml
     cands = sorted(
         n for n in names if n.startswith("ppt/slides/slide") and n.endswith(".xml")
     )
@@ -169,9 +169,9 @@ def _parse_slide(zf: zipfile.ZipFile, part: str) -> list:
 
 def extract_ppt(data: bytes) -> dict:
     """
-    Retourne {"slides": [ [blocs] ... ], "media": {part: {size, fmt}}}.
-    media couvre ppt/media/* de TOUT le package (les diapositives référencent
-    des parties partagées).
+    Returns {"slides": [ [blocks] ... ], "media": {part: {size, fmt}}}.
+    media covers ppt/media/* of the WHOLE package (slides reference shared
+    parts).
     """
     zf = zipfile.ZipFile(io.BytesIO(data))
     media = {}

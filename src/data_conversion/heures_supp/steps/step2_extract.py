@@ -1,23 +1,22 @@
 """
-Step 2 - Extraction de structure déterministe (AUCUN LLM).
+Step 2 - Deterministic structure extraction (NO LLM).
 
-Pour chaque document de la sélection : téléchargement du fichier brut,
-sniffing du format réel, extraction XML (docx / pptx embarqués / pdf / rtf /
-html), récupération de la structure (sections), triage heuristique des
-images. Les images conservées par le triage sont uploadées sous
-data/figs/{cid}/ pour l'OCR de la step 3.
+For each document of the selection: download the raw file, sniff the real
+format, XML extraction (docx / embedded pptx / pdf / rtf / html), structure
+recovery (sections), heuristic triage of the images. The images kept by the
+triage are uploaded under data/figs/{cid}/ for the step 3 OCR.
 
-Sortie (zone autorisée) : data/shard_XXXXX.parquet
-  Colonnes : cid, reference, dateSignature, doc_type, format, n_sections,
-             n_tables, n_figures, n_ocr_kept, n_ocr_dropped, error, doc_json
-Reprise : les shards déjà présents sur S3 ne sont jamais retraités.
+Output (authorized zone): data/shard_XXXXX.parquet
+  Columns: cid, reference, dateSignature, doc_type, format, n_sections,
+           n_tables, n_figures, n_ocr_kept, n_ocr_dropped, error, doc_json
+Resume: shards already present on S3 are never reprocessed (unless --force).
 
-Lancement :
-    uv run src/data_conversion/heures_supp/step2_extract.py
-    uv run src/data_conversion/heures_supp/step2_extract.py --limit 30   # essai rapide
+Run:
+    uv run src/data_conversion/heures_supp/steps/step2_extract.py
+    uv run src/data_conversion/heures_supp/steps/step2_extract.py --limit 30   # quick test
+    uv run src/data_conversion/heures_supp/steps/step2_extract.py --force      # reprocess complete shards
 """
 import argparse
-import json
 import logging
 import os
 import sys
@@ -27,9 +26,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 from tqdm import tqdm
 
-import config
-import utils
-from doc_process import process_document_bytes, record_to_json
+# Make the heures_supp package importable when run as a script
+# (package root: src/data_conversion; no package install needed).
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
+from heures_supp.core import config, utils  # noqa: E402
+from heures_supp.core.doc_process import process_document_bytes, record_to_json  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -38,10 +40,10 @@ logging.getLogger("s3fs").setLevel(logging.WARNING)
 
 def existing_shards() -> dict:
     """
-    idx -> nb de lignes des shards déjà écrits.
-    Un shard n'est considéré COMPLET (et donc définitif) que s'il contient
-    SHARD_SIZE lignes ; un shard partiel (essai --limit, crash en cours
-    d'écriture) sera re-traité à la prochaine relance.
+    idx -> row count of the already-written shards.
+    A shard is considered COMPLETE (and therefore final) only if it contains
+    SHARD_SIZE rows; a partial shard (--limit test, crash mid-write) is
+    reprocessed on the next run.
     """
     prefix = config.DATA_PATH
     try:
@@ -74,7 +76,7 @@ def upload_figure(fig_s3: str, data: bytes) -> bool:
 
 
 def process_one(row, figs_base: str) -> dict:
-    """Traite un document (ligne de la sélection) et retourne le record."""
+    """Process one document (a selection row) and return the record."""
     cid = row["cid"]
     data = utils.download_bytes(row["docx_path"])
     if data is None:
@@ -84,7 +86,7 @@ def process_one(row, figs_base: str) -> dict:
             "doc_type": "missing", "format": "missing",
             "n_sections": 0, "n_tables": 0, "n_figures": 0,
             "n_ocr_kept": 0, "n_ocr_dropped": 0,
-            "error": "fichier introuvable ou téléchargement impossible",
+            "error": "file missing or download failed",
             "doc_json": record_to_json({"cid": cid, "errors": ["missing file"]}),
         }
     try:
@@ -109,7 +111,7 @@ def process_one(row, figs_base: str) -> dict:
     except Exception as e:
         import traceback
 
-        logger.error(f"Échec inattendu sur {cid} : {e}\n{traceback.format_exc()}")
+        logger.error(f"Unexpected failure on {cid}: {e}\n{traceback.format_exc()}")
         return {
             "cid": cid, "reference": row.get("reference"),
             "dateSignature": str(row.get("dateSignature")),
@@ -137,38 +139,41 @@ def process_shard(rows: pd.DataFrame, shard_idx: int, use_threads: bool) -> None
         for i, (_, row) in enumerate(rows.iterrows()):
             records[i] = process_one(row.to_dict(), figs_base)
             if (i + 1) % 25 == 0:
-                logger.info(f"shard {shard_idx:05d}: {i + 1}/{len(rows)} traités")
+                logger.info(f"shard {shard_idx:05d}: {i + 1}/{len(rows)} processed")
 
     df = pd.DataFrame(records)
     ok = utils.put_parquet(df, shard_output_path(shard_idx))
     if not ok:
         raise RuntimeError(
-            f"Impossible d'écrire le shard {shard_idx} sur S3 après "
-            f"{config.S3_WRITE_RETRIES} tentatives."
+            f"Could not write shard {shard_idx} to S3 after "
+            f"{config.S3_WRITE_RETRIES} attempts."
         )
     n_err = int(df["error"].notna().sum())
     logger.info(
-        f"Shard {shard_idx:05d} sauvegardé ({len(df)} documents, {n_err} avec erreur)."
+        f"Shard {shard_idx:05d} saved ({len(df)} documents, {n_err} with errors)."
     )
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Step 2 : extraction de structure")
+    parser = argparse.ArgumentParser(description="Step 2: structure extraction")
     parser.add_argument("--limit", type=int, default=0,
-                        help="Ne traiter que les N premiers documents (0 = tout)")
+                        help="Process only the first N documents (0 = all)")
     parser.add_argument("--sequential", action="store_true",
-                        help="Désactiver le parallélisme (debug)")
+                        help="Disable parallelism (debug)")
+    parser.add_argument("--force", action="store_true",
+                        help="Reprocess complete shards (e.g. after a change to "
+                             "structure detection)")
     args = parser.parse_args()
 
     sel = pd.read_parquet(config.SELECTION_FILE, filesystem=config.fs)
     if args.limit > 0:
         sel = sel.head(args.limit).reset_index(drop=True)
-        logger.info(f"Mode --limit : {len(sel)} documents seulement")
+        logger.info(f"--limit mode: only {len(sel)} documents")
     else:
-        logger.info(f"{len(sel)} documents à traiter")
+        logger.info(f"{len(sel)} documents to process")
 
     n_shards = max(1, -(-len(sel) // config.SHARD_SIZE))
-    done = existing_shards()
+    done = {} if args.force else existing_shards()
     use_threads = not args.sequential
 
     total_ok = 0
@@ -176,21 +181,21 @@ def main():
     for shard_idx in range(n_shards):
         expected = min(config.SHARD_SIZE, len(sel) - shard_idx * config.SHARD_SIZE)
         if done.get(shard_idx, 0) >= expected:
-            logger.info(f"Shard {shard_idx:05d} complet sur S3 -> ignoré (reprise).")
+            logger.info(f"Shard {shard_idx:05d} complete on S3 -> skipped (resume).")
             continue
         rows = sel.iloc[shard_idx * config.SHARD_SIZE:(shard_idx + 1) * config.SHARD_SIZE].reset_index(drop=True)
         t0 = time.time()
         process_shard(rows, shard_idx, use_threads)
         dt = time.time() - t0
-        logger.info(f"Shard {shard_idx:05d} : {dt:.0f}s")
-        # petite statistique sur le shard
+        logger.info(f"Shard {shard_idx:05d}: {dt:.0f}s")
+        # small statistics on the shard
         df = pd.read_parquet(shard_output_path(shard_idx), filesystem=config.fs)
         total_ok += int(df["error"].isna().sum())
         total_err += int(df["error"].notna().sum())
 
     logger.info(
-        f"Step 2 terminée : {total_ok} documents OK, {total_err} avec erreur, "
-        f"shards écrits dans {config.DATA_PATH}"
+        f"Step 2 done: {total_ok} documents OK, {total_err} with errors, "
+        f"shards written to {config.DATA_PATH}"
     )
 
 
