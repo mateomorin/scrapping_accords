@@ -47,6 +47,16 @@ RE_PARTIES = re.compile(r"^(?:Entre\s+les\s+soussign|Soussign[ée]s\s*:?)", re.I
 # marker of table-of-contents entries copied into the body. Years (4 digits)
 # are not affected.
 RE_TOC_PAGE_TAIL = re.compile(r"[:\s]?\d{1,3}$")
+# Glued page reference: a letter immediately followed by 1-3 digits (with or
+# without a dot) at the very end ("Substitution.11", "Adhésion11"). This is an
+# unambiguous marker of a TOC entry -- a real heading's trailing number is
+# never glued to a letter (it is space-separated, as in "Article 5", or a
+# bare decimal like "4.2.1"). Years (4 digits) and "Article N" are unaffected.
+RE_TOC_GLUED = re.compile(r"[A-Za-zÀ-ÿ]{1}\.?\d{1,3}$")
+# Table-of-contents anchor: a heading that IS the TOC block ("SOMMAIRE",
+# "TABLE DES MATIÈRES"). The section it creates is flagged is_toc=True so a
+# downstream consumer (RAG) can optionally exclude the reference list.
+RE_TOC_ANCHOR = re.compile(r"^\s*(?:SOMMAIRE|TABLE\s+DES?\s+MATI[ÈE]RES?)\b", re.I)
 # Censored party name ("EEEEEE", "XXXXXXXX"): not a heading.
 RE_PLACEHOLDER = re.compile(r"^(.)\1{3,}$")
 # Boilerplate preamble formulas (parties / convening): CAPS but not headings.
@@ -84,6 +94,7 @@ def score_paragraph(text: str, feat: dict) -> tuple:
     s = 0
     ev = []
     outline_lvl = feat.get("outline_lvl")
+    bold = feat.get("bold_frac", 0.0)
 
     # --- strong / explicit signals ---
     if outline_lvl is not None:
@@ -113,7 +124,10 @@ def score_paragraph(text: str, feat: dict) -> tuple:
     if m_rom:
         s += 2
         ev.append("roman-num")
-    if dec_depth is not None and n <= 15:
+    # Decimal numbering: the bonus applies to short lines, or to long lines
+    # that are fully bold -- a numbered heading that doubles as a long
+    # enumeration (e.g. "4.2. Agents de maitrise..., agents de ...").
+    if dec_depth is not None and (n <= 15 or bold >= 0.8):
         s += 2
         ev.append(f"decimal-num(L{dec_depth})")
     if m_let and n <= 12:
@@ -122,18 +136,26 @@ def score_paragraph(text: str, feat: dict) -> tuple:
     if m_kw and n <= 12:
         s += 3
         ev.append("kw-section")
+    has_numbering = any(x is not None for x in (m_art, m_rom, m_let)) or dec_depth is not None
     # Hard veto: boilerplate formulas and censored names are NEVER headings,
-    # whatever the typography (including CAPS + bold).
+    # whatever the typography (including CAPS + bold). A glued page number is
+    # also a hard veto: a letter immediately followed by 1-3 trailing digits
+    # ("Substitution.11", "Adhésion11", "AVENANT5") is unambiguously a
+    # table-of-contents reference -- a real heading's trailing number is never
+    # glued to a letter (it is space-separated, as in "Article 5", or a bare
+    # decimal such as "4.2.1"). This is unambiguous even for short, bold, CAPS
+    # entries ("ARTICLE 1 – ...AVENANT5") that a soft penalty could not sink.
     is_boiler = bool(RE_BOILERPLATE.match(t))
     is_placeholder = bool(RE_PLACEHOLDER.match(re.sub(r"\s+", "", t)))
-    hard_veto = is_boiler or is_placeholder
-    # A real heading almost never ends with a bare 1-3 digit number: that is
-    # the marker of TOC entries.
+    toc_glued = bool(RE_TOC_GLUED.search(t))
+    hard_veto = is_boiler or is_placeholder or toc_glued
+    # A real heading almost never ends with a space-separated 1-3 digit number
+    # ("APPLICATION 7"): the marker of TOC entries. This form is ambiguous for
+    # short lines (it could be "Article 5"), so it only vetoes when n >= 4.
     toc_like = n >= 4 and bool(RE_TOC_PAGE_TAIL.search(t))
 
     # --- typographic signals ---
     caps = feat.get("caps", 0.0)
-    bold = feat.get("bold_frac", 0.0)
     u = feat.get("u_frac", 0.0)
     caps_short = caps >= 0.8 and n <= 10
     bold_short = bold >= 0.8 and n <= 12
@@ -153,14 +175,17 @@ def score_paragraph(text: str, feat: dict) -> tuple:
     # --- penalties ---
     if hard_veto:
         s -= 4
-        ev.append("boilerplate" if is_boiler else "placeholder")
+        ev.append("boilerplate" if is_boiler
+                  else "placeholder" if is_placeholder else "toc-page-glued")
     if toc_like:
         s -= 3
         ev.append("toc-page-ref")
     if feat.get("is_list") and not (caps_short and bold_short):
         s -= 3
         ev.append("list-item")
-    if n > 15:
+    # The "long" penalty targets plain sentences: an explicit numbering
+    # signal (article / roman / letter / decimal) survives long titles.
+    if n > 15 and not has_numbering:
         s -= 2
         ev.append("long")
     if t.endswith(".") and n > 8:
@@ -168,7 +193,6 @@ def score_paragraph(text: str, feat: dict) -> tuple:
         ev.append("sentence-end")
 
     strong_typo = caps_short and bold_short
-    has_numbering = any(x is not None for x in (m_art, m_rom, m_let)) or dec_depth is not None
     is_heading = (
         not hard_veto
         and (s >= 3 or (s >= 1 and not toc_like and (has_numbering or strong_typo or "kw-section" in ev)))
@@ -299,14 +323,19 @@ def build_structure(items: list, scored: dict, para_units: list,
                 while stack and stack[-1]["level"] >= level:
                     stack.pop()
                 conf = "high" if res[0] >= 4 else ("medium" if res[0] >= 3 else "low")
+                title = u["text"].strip()
                 sec = {
                     "id": f"S{len(sections) + 1}",
                     "level": level,
                     "number": number,
-                    "title": u["text"].strip(),
+                    "title": title,
                     "confidence": conf,
                     "evidence": ev,
                     "parent": stack[-1]["id"] if stack else None,
+                    # True only for the table-of-contents anchor (SOMMAIRE /
+                    # TABLE DES MATIÈRES): its body is the reference list, not
+                    # real content. Downstream (RAG) may drop these.
+                    "is_toc": bool(RE_TOC_ANCHOR.match(title)),
                     "paras": [],
                     "table_ids": [],
                     "figure_ids": [],

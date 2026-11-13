@@ -203,6 +203,22 @@ def file_exists(remote_path: str) -> bool:
         return False
 
 
+# ---------------------------------------------------------------- text clean
+# No-break / narrow no-break spaces (French Word typesets them before
+# "; : ! ?" and after numbers). Harmless in source data, but they break
+# BM25 token matching and add noise for embeddings, so they are normalized
+# to a regular space during extraction (doc_process) and at finalize time
+# (step4, which also cleans OCR text from older results files).
+RE_NBSP = re.compile(r"[\u00a0\u2007\u202f]")
+
+
+def normalize_ws(t):
+    """Replace no-break space variants with a regular space."""
+    if not t:
+        return t
+    return RE_NBSP.sub(" ", t)
+
+
 # --------------------------------------------------------------------- LLM
 _llm_client = None
 

@@ -15,6 +15,7 @@ import zipfile
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from heures_supp.core.doc_process import process_document_bytes  # noqa: E402
+from heures_supp.core.structure import RE_TOC_GLUED  # noqa: E402
 
 HERE = os.path.join(os.path.dirname(__file__), "..", "..", "..")
 EXAMPLES = os.path.join(HERE, "example_data")
@@ -256,6 +257,127 @@ def main():
     check("ex7: Article 2 stays at L1 root (invariance)",
           by_title.get("Article 2", {}).get("level") == 1
           and by_title.get("Article 2", {}).get("parent") is None)
+
+    # --- 8. Long numbered (decimal) headings + NBSP normalization ---
+    # Regression for the "long numbered heading" scoring bug: a numbered
+    # heading that doubles as a long enumeration (e.g. a 4.2 / 4.3 banner
+    # listing every job category) used to be demoted by the "long" penalty
+    # and swallowed into the previous section's body. Now: the decimal
+    # bonus applies to fully-bold long lines and the "long" penalty is
+    # skipped whenever an explicit numbering signal is present. The 4.4 line
+    # is the control: long AND numbered but NOT bold -> must stay body text.
+    docx = build_synthetic_docx([
+        ("Article 4 - DUREE ET AMENAGEMENT DU TEMPS DE TRAVAIL", True),
+        ("4.1. Personnel d'exploitation : ouvriers, employs et techniciens", True),
+        ("4.1.1. Principes generaux", True),
+        ("4.2. Agents de maitrise\u00a0d'exploitation, agents de maitrise "
+         "d'etudes et developpement, agents administratifs ou d'etudes "
+         "lies a l'exploitation", True),
+        ("4.2.1. Principes generaux", True),
+        ("4.3. Personnels administratifs, comptables, etudes et autres "
+         "emplois non directement lies a l'exploitation : employs, "
+         "techniciens, agents de maitrise", True),
+        ("4.3.1. Principes generaux", True),
+        ("4.3.2. Samedis et jours feries", True),
+        ("4.4. Les agents de maitrise d'exploitation ainsi que les employs "
+         "et techniciens lies a l'exploitation sont concernes par la "
+         "presente clause", False),
+    ])
+    rec = process_document_bytes(docx, "EX8", "ref8")
+    print("\n=== synthetic docx (long numbered headings + NBSP) ===")
+    summary(rec)
+    by_number = {s["number"]: s for s in rec["sections"] if s.get("number")}
+    art4 = by_number.get("Article 4", {})
+    h42 = by_number.get("4.2", {})
+    h421 = by_number.get("4.2.1", {})
+    h43 = by_number.get("4.3", {})
+    h432 = by_number.get("4.3.2", {})
+    check("ex8: Article 4 detected at L1 root",
+          art4.get("level") == 1 and art4.get("parent") is None)
+    check("ex8: long bold numbered 4.2 is a heading at L2 under Article 4",
+          h42.get("level") == 2 and h42.get("parent") == art4.get("id"))
+    check("ex8: 4.2.1 attached under 4.2",
+          h421.get("parent") == h42.get("id"))
+    check("ex8: long bold numbered 4.3 is a heading at L2 under Article 4",
+          h43.get("level") == 2 and h43.get("parent") == art4.get("id"))
+    check("ex8: 4.3.2 attached under 4.3",
+          h432.get("parent") == h43.get("id"))
+    check("ex8: long NON-bold numbered 4.4 is NOT a heading",
+          "4.4" not in by_number
+          and not any(s["title"].startswith("4.4.") for s in rec["sections"]))
+    check("ex8: 4.4 control line kept in the body of 4.3.2",
+          "presente clause" in (h432.get("body_md") or ""))
+    check("ex8: no NBSP in any title",
+          all("\u00a0" not in s["title"] for s in rec["sections"])
+          and all("\u00a0" not in t["title"] for t in rec["toc"]))
+
+    # --- 9. Sommaire / table-of-contents: entries are references, not real
+    # headings. TOC entries carry a page number GLUED to the last word
+    # ("1.3.1. Substitution.11", "1.4 - Adhésion11"); short ones (n < 4) used
+    # to slip through the "n >= 4" page-ref gate and become fake sections. The
+    # glued form is now a HARD veto (unambiguous), which also sinks strong-typo
+    # entries such as a bold CAPS "ARTICLE N – TITLE5" that a soft penalty
+    # could not. The real content headings below share the same titles but
+    # WITHOUT the glued page number (they end in a period or a clean word) and
+    # must be detected.
+    docx = build_synthetic_docx([
+        ("SOMMAIRE", True),
+        ("PREAMBULE2", False),
+        ("TITRE 1 : DISPOSITIONS GENERALES10", False),
+        ("1.3.1. Substitution.11", False),       # short glued TOC entry -> body
+        ("1.4 - Adhésion11", False),            # short glued TOC entry -> body
+        ("ARTICLE 1 – OBJET, CHAMP D'APPLICATION5", True),  # bold CAPS+ARTICLE glued -> body
+        ("2.1 - Définitions13", False),         # short glued TOC entry -> body
+        # ---- real content (same titles, clean, bold) ----
+        ("TITRE 1 : DISPOSITIONS GENERALES", True),
+        ("1.3.1. Substitution.", True),
+        ("La substitution est prevue par le present accord.", False),
+        ("1.4 - Adhésion", True),
+        ("L'adhesion des nouveaux employeurs est libre.", False),
+        ("ARTICLE 1 – OBJET, CHAMP D'APPLICATION", True),
+        ("Le present article definit l'objet de l'accord.", False),
+        ("2.1 - Définitions", True),
+        ("Sont consideres comme heures supplementaires les heures effectuees "
+         "au dela du contingent.", False),
+    ])
+    rec = process_document_bytes(docx, "EX9", "ref9")
+    print("\n=== synthetic docx (sommaire / table-of-contents) ===")
+    summary(rec)
+    by_number = {s["number"]: s for s in rec["sections"] if s.get("number")}
+    check("ex9: SOMMAIRE detected as a section",
+          any("SOMMAIRE" in s["title"].upper() for s in rec["sections"]))
+    sommaire = next((s for s in rec["sections"]
+                     if "SOMMAIRE" in s["title"].upper()), {})
+    check("ex9: SOMMAIRE section flagged is_toc=True",
+          sommaire.get("is_toc") is True)
+    check("ex9: real sections are not flagged is_toc",
+          all(not s.get("is_toc") for s in rec["sections"]
+              if "SOMMAIRE" not in s["title"].upper()))
+    check("ex9: is_toc also exposed on the flat toc list",
+          any(t.get("is_toc") is True for t in rec["toc"])
+          and all(t.get("is_toc") is not None for t in rec["toc"]))
+    # Core invariant: no section title carries a glued page number.
+    check("ex9: no section title has a glued page number (TOC entries not headings)",
+          not any(RE_TOC_GLUED.search(s["title"]) for s in rec["sections"]))
+    # The real 1.4 heading wins the "1.4" slot and is clean (the fake
+    # "1.4 - Adhésion11" did not become a section).
+    check("ex9: real 1.4 heading clean (no page number)",
+          by_number.get("1.4", {}).get("title") == "1.4 - Adhésion")
+    check("ex9: real 1.3.1 heading present (trailing period, no page number)",
+          by_number.get("1.3.1", {}).get("title", "").endswith("Substitution."))
+    check("ex9: real 2.1 heading present with its body",
+          by_number.get("2.1", {}).get("n_paras", 0) >= 1)
+    # The strong-typo (bold + CAPS + ARTICLE) TOC entry must be sunk too; the
+    # real clean "ARTICLE 1" heading is the one that survives.
+    check("ex9: bold CAPS+ARTICLE glued TOC entry NOT a heading",
+          not any(s["title"].endswith("APPLICATION5") for s in rec["sections"]))
+    check("ex9: real ARTICLE 1 heading clean with its body",
+          by_number.get("ARTICLE 1", {}).get("n_paras", 0) >= 1
+          and by_number.get("ARTICLE 1", {}).get("title")
+          == "ARTICLE 1 – OBJET, CHAMP D'APPLICATION")
+    check("ex9: real TITRE 1 container present (no page number)",
+          any(s["title"].upper().startswith("TITRE 1") and "10" not in s["title"]
+              for s in rec["sections"]))
 
     print()
     if FAILURES:

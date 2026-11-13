@@ -34,11 +34,17 @@ SUMMARY_FILE = config.LOGS_PATH + "summary.json"
 
 
 def load_ocr_results() -> dict:
-    """fig_ref -> (ocr_md, ok); the last successful result wins."""
+    """
+    fig_ref -> (ocr_md, ok); the last successful result wins.
+
+    OCR text is normalized here (NBSP variants -> space): it also cleans
+    results produced by older runs, and covers both merge points (figures
+    and the pdf_scanned "FULL" result).
+    """
     out = {}
     for r in utils.read_jsonl(config.DATA_PATH + "ocr_results.jsonl"):
         if r.get("ok"):
-            out[r["fig_ref"]] = (r.get("ocr_md"), True)
+            out[r["fig_ref"]] = (utils.normalize_ws(r.get("ocr_md")), True)
         elif r["fig_ref"] not in out:
             out[r["fig_ref"]] = (None, False)
     return out

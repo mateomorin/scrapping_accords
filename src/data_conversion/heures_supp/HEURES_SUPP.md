@@ -49,6 +49,7 @@ heures_supp/
     ├── step0_select.py
     ├── step1_profile.py
     ├── step2_extract.py
+    ├── step2b_refresh_structure.py   # structure refresh (no figure re-upload)
     ├── step3_ocr.py
     ├── step4_finalize.py
     └── step5_validate.py
@@ -91,6 +92,46 @@ by the `w:pStyle` style via `styles.xml`; 0-based in the source, stored
 1-based) and ODF `text:outline-level` (directly on `<text:h>` or carried
 by the paragraph style of `text:p` — the values observed in the corpus are
 1-based, never 0).
+
+**Long numbered headings**: some agreements use a numbered line as both a
+heading and a long enumeration (e.g. `4.2. Agents de maîtrise ..., agents de
+maîtrise ..., agents administratifs ...` — 18+ words). A bare "too long"
+penalty would demote such a line into the previous section's body. The scorer
+therefore (a) never applies the "long" penalty when an explicit numbering
+signal is present (article / roman / letter / decimal), and (b) grants the
+decimal bonus to a long line when it is fully bold (bold fraction ≥ 0.8). A
+long numbered line that is *not* bold (a body sentence that merely starts
+with a number) still scores 0 and is not a heading (selftest ex8 covers both
+cases).
+
+**Sommaire / table of contents**: many agreements open with a `SOMMAIRE` /
+`TABLE DES MATIÈRES` whose entries copy the real part titles and append a
+**page number glued to the last word** (`1.3.1. Substitution.11`,
+`1.4 - Adhésion11`, `ARTICLE 1 – OBJET, …AVENANT5`). Left alone, the numbered
+entries (decimal or `ARTICLE N`) are scored as real headings and the
+TOC becomes a stack of fake sections. Detection is based on the page-number
+marker, in two tiers:
+
+- **Glued page number** (a letter immediately before 1–3 trailing digits, with
+  or without a dot — `RE_TOC_GLUED`) is an **unambiguous hard veto**: a real
+  heading's trailing number is never glued to a letter (it is space-separated,
+  as in `Article 5`, or a bare decimal such as `4.2.1`). It demotes the line at
+  any length, even for bold + CAPS + `ARTICLE N` entries that a soft penalty
+  could not sink.
+- **Space-separated page number** (`APPLICATION 7`, `RE_TOC_PAGE_TAIL`) is
+  ambiguous for short lines (`Article 5`), so it only vetoes when `n >= 4`.
+
+Real part titles keep their clean form (no glued page number, e.g.
+`1.3.1. Substitution.` or `ARTICLE 1 – OBJET, …AVENANT`) and are still
+detected; the TOC entries collapse into the body of the `SOMMAIRE` section,
+which is lossless (the references are preserved, just no longer fake sections).
+Selftest ex9 covers the short, bold-CAPS-`ARTICLE`, and trailing-period cases.
+
+The section created by the TOC anchor (`SOMMAIRE` / `TABLE DES MATIÈRES`)
+carries an `is_toc: true` flag (on both `sections` and the flat `toc` list);
+every other section has `is_toc: false`. A downstream consumer (RAG) can use
+it to optionally exclude the reference list from chunks. The flag is a pure
+schema addition — it does not change figure ids, so re-OCR is never required.
 
 ## S3 safety
 
@@ -160,6 +201,33 @@ are uploaded to `data/figs/{cid}/`.
 Outputs: `data/shard_XXXXX.parquet` (500 docs/shard, checkpoint: a shard is
 reprocessed only if incomplete — a `--limit` test does not block later
 runs) + `data/figs/`.
+
+### Step 2b — Structure refresh (0 LLM, faster than `step2 --force`)
+
+```bash
+uv run src/data_conversion/heures_supp/steps/step2b_refresh_structure.py             # refresh all shards
+uv run src/data_conversion/heures_supp/steps/step2b_refresh_structure.py --skip-complete  # resume after a crash
+uv run src/data_conversion/heures_supp/steps/step2b_refresh_structure.py --limit 30  # quick test
+uv run src/data_conversion/heures_supp/steps/step2b_refresh_structure.py --workers 8
+```
+
+Use this **instead of `step2 --force`** after a change to structure
+detection (`core/structure.py`) or to text normalization. It re-downloads
+and re-extracts every document but does **not** re-upload the figures: the
+triage is deterministic, so the kept figure set (and therefore the figure
+ids and their S3 paths) is identical, and the files are already on
+`data/figs/`. Each kept figure's `fig_s3` is restored at its deterministic
+path. Consequences:
+
+- no S3 PUTs for figures (the slow part of `step2 --force`);
+- `data/ocr_results.jsonl` stays valid — figure ids are unchanged, so step 3
+  does **not** need to re-OCR figures that were already processed;
+- a per-shard sidecar `data/shard_XXXXX.refreshed` records completion for
+  `--skip-complete` resume.
+
+**Do not run step2b concurrently with an active step 3 run** (the shard
+parquet files are rewritten while step 3 may be reading them). After step2b:
+re-run step 3 only if you want to (re)OCR, then step 4, then step 5.
 
 ### Step 3 — OCR of the kept images
 
@@ -262,6 +330,14 @@ The raw documents are heterogeneous; the extractor handles:
   `officeDocument`) — some files have `word/document2.xml`.
 - **Malformed XML**: parsing in `recover` mode (invalid PCDATA chars /
   control characters).
+- **No-break spaces (U+00A0 / U+2007 / U+202F)**: French Word typesets a
+  no-break space before `; : ! ?` and after numbers. Harmless in the source,
+  but they break BM25 token matching and add noise for embeddings, so they
+  are normalized to a regular space during extraction (`utils.normalize_ws`,
+  applied to paragraph text and table cells in `doc_process`) and at finalize
+  time (`step4`, which also cleans OCR text from older `ocr_results.jsonl`
+  runs). Titles, bodies, table grids and the markdown renderings all inherit
+  the normalization.
 - **ODF (OpenDocument)**: `mimetype` + `content.xml` saved as `.docx`.
   The native headings `<text:h text:outline-level="N">` are used as a
   strong signal; the `table:table` tables and `draw:frame` images are

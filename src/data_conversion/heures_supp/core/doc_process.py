@@ -13,7 +13,7 @@ from .extract import odf as extract_odf
 from .extract import pdf as extract_pdf
 from .extract import slides as extract_slides
 from .extract import word as extract_word
-from .utils import sniff_format
+from .utils import normalize_ws, sniff_format
 
 logger = logging.getLogger(__name__)
 
@@ -346,13 +346,19 @@ def process_document_bytes(data: bytes, cid: str, reference: str,
     for b in raw_blocks:
         if b.get("type") == "para":
             para_idx = len(para_units)
-            para_units.append({"text": b["text"], "feat": b["feat"], "src": b.get("src")})
+            # NBSP normalization (French Word typesets U+00A0 before
+            # "; : ! ?" and after numbers): applied once here for all
+            # formats, so titles, bodies and table contexts inherit it.
+            para_units.append(
+                {"text": normalize_ws(b["text"]), "feat": b["feat"], "src": b.get("src")}
+            )
             last_para_idx = para_idx
             items.append({"kind": "para", "idx": para_idx, "u": para_units[-1]})
         elif b.get("type") == "table":
             table_n += 1
             tbl_id = f"T{table_n}"
-            grid = b.get("grid") or []
+            # Same NBSP normalization for cells (md and grid share it).
+            grid = [[normalize_ws(c) for c in row] for row in (b.get("grid") or [])]
             items.append({
                 "kind": "table", "id": tbl_id, "rattach": last_para_idx,
                 "grid": grid,
@@ -403,7 +409,8 @@ def process_document_bytes(data: bytes, cid: str, reference: str,
     # --- record assembly ---
     toc = [
         {"id": s["id"], "level": s["level"], "number": s["number"],
-         "title": s["title"], "confidence": s["confidence"]}
+         "title": s["title"], "confidence": s["confidence"],
+         "is_toc": s.get("is_toc", False)}
         for s in tree["sections"]
     ]
     sections_out = []
@@ -412,6 +419,7 @@ def process_document_bytes(data: bytes, cid: str, reference: str,
             "id": s["id"], "level": s["level"], "number": s["number"],
             "title": s["title"], "confidence": s["confidence"],
             "evidence": s["evidence"], "parent": s["parent"],
+            "is_toc": s.get("is_toc", False),
             "body_md": s["body_md"], "n_paras": s["n_paras"],
             "table_ids": s["table_ids"], "figure_ids": s["figure_ids"],
         })

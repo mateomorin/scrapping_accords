@@ -116,7 +116,7 @@ def rasterize_vector(data: bytes, ext: str):
         try:
             subprocess.run(
                 [bin_, src, "-density", "150", f"{dst}.png"],
-                check=True, capture_output=True, timeout=120,
+                check=True, capture_output=True, timeout=240,
             )
         except Exception:
             return None
