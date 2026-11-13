@@ -32,3 +32,43 @@ dependencies = [
 members = [
     "markitdown/packages/markitdown",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "ruff>=0.17.5",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # Pyflakes
+    "I",   # isort (gestion des imports)
+    "D",   # pydocstyle (gestion des docstrings)
+    "BLE", # flake8-blind-except (contrôle des except Exception)
+]
+
+ignore = [
+    # Authorize "except Exception"
+    "BLE001",
+    
+    # Ignore compulsory docstrings for very simple functions
+    "D103",
+
+    # Authorize short docstrings on multiple lines
+    "D200",
+
+    # Authorize line jump after """
+    "D212",
+
+    # No blankline before docstring in class
+    "D203"
+]
+
+[tool.ruff.format]
+indent-style = "space"
+quote-style = "double"
