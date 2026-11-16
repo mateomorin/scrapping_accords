@@ -14,7 +14,7 @@ Resume: shards already present on S3 are never reprocessed (unless --force).
 Run:
     uv run src/data_conversion/heures_supp/steps/step2_extract.py
     uv run src/data_conversion/heures_supp/steps/step2_extract.py --limit 30   # quick test
-    uv run src/data_conversion/heures_supp/steps/step2_extract.py --force      # reprocess complete shards
+    uv run src/data_conversion/heures_supp/steps/step2_extract.py --force      # reprocess shards
 """
 
 import argparse
@@ -209,7 +209,8 @@ def main():
         total_err += int(df["error"].notna().sum())
 
     logger.info(
-        f"Step 2 done: {total_ok} documents OK, {total_err} with errors, shards written to {config.DATA_PATH}"
+        f"Step 2 done: {total_ok} documents OK, {total_err} with errors, "
+        f"shards written to {config.DATA_PATH}"
     )
 
 

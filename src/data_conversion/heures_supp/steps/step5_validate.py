@@ -239,7 +239,8 @@ def main():
     if ok:
         logger.info(f"Report written: {REPORT_FILE}")
     logger.info(
-        f"Summary: doc_types={report['doc_types']} formats={report['formats']} errors={report['n_with_error']}"
+        f"Summary: doc_types={report['doc_types']} formats={report['formats']} "
+        f"errors={report['n_with_error']}"
     )
 
 

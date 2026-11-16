@@ -288,7 +288,8 @@ async def process_dataset(metadata_name: str, output_name: str):
     n_docs = len(doc_paths)
     n_shards = math.ceil(n_docs / config.SHARD_SIZE)
     logger.info(
-        f"[{output_name}] {n_docs} documents to process, split into {n_shards} shards of {config.SHARD_SIZE}."
+        f"[{output_name}] {n_docs} documents to process, "
+        f"split into {n_shards} shards of {config.SHARD_SIZE}."
     )
 
     existing_shards = list_existing_shards(output_name)
@@ -381,7 +382,8 @@ def configure_output_name(output_name: str, metadata_name: str):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Transformation docx -> markdown with sharding, S3 checkpoints S3 and crash recovery"
+        description="Transformation docx -> markdown with sharding, "
+        "S3 checkpoints S3 and crash recovery"
     )
 
     parser.add_argument(

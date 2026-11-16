@@ -39,7 +39,7 @@ Veille à respecter l'ortographe, la syntaxe et la police de caractère (gras, i
 Si l'image comporte un schéma, décris ce schéma.
 
 TOUT DOIT ÊTRE ECRIT EN FORMAT MARKDOWN
-"""
+"""  # noqa: E501
 
 llm_client = OpenAI(
     base_url=os.environ["LLM_API_URL"],
