@@ -24,7 +24,7 @@ needs no re-run for figures that were already OCR'd.
 IMPORTANT: do not run step2b concurrently with an active step 3 OCR run (the
 shard parquet files are rewritten while step 3 may be reading them).
 
-Resume: a per-shard sidecar (data/shard_XXXXX.refreshed) records that a shard
+Resume: a per-shard sidecar (data/refreshed_shards/shard_XXXXX.refreshed) records that a shard
 was refreshed with the expected row count. With --skip-complete, completed
 shards are skipped (useful after a crash). By default every shard is rewritten.
 
@@ -65,7 +65,7 @@ _OCRABLE_EXT = ("png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "webp")
 
 
 def _sidecar_path(shard_idx: int) -> str:
-    return f"{config.DATA_PATH}shard_{shard_idx:05d}.refreshed"
+    return f"{config.REFRESHED_SHARDS_PATH}shard_{shard_idx:05d}.refreshed"
 
 
 def _sidecar_complete(shard_idx: int, expected: int) -> bool:
@@ -236,7 +236,7 @@ def main():
 
     logger.info(
         f"Step 2b done: {total_ok} documents OK, {total_err} with errors, "
-        f"{n_skipped} shards skipped. Shards written to {config.DATA_PATH}"
+        f"{n_skipped} shards skipped. Shards written to {config.SHARDS_PATH}"
     )
     logger.info(
         "Figures were NOT re-uploaded; ocr_results.jsonl stays valid. "

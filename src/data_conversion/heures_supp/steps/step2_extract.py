@@ -6,7 +6,7 @@ format, XML extraction (docx / embedded pptx / pdf / rtf / html), structure
 recovery (sections), heuristic triage of the images. The images kept by the
 triage are uploaded under data/figs/{cid}/ for the step 3 OCR.
 
-Output (authorized zone): data/shard_XXXXX.parquet
+Output (authorized zone): data/shards/shard_XXXXX.parquet
   Columns: cid, reference, dateSignature, doc_type, format, n_sections,
            n_tables, n_figures, n_ocr_kept, n_ocr_dropped, error, doc_json
 Resume: shards already present on S3 are never reprocessed (unless --force).
@@ -47,7 +47,7 @@ def existing_shards() -> dict:
     SHARD_SIZE rows; a partial shard (--limit test, crash mid-write) is
     reprocessed on the next run.
     """
-    prefix = config.DATA_PATH
+    prefix = config.SHARDS_PATH
     try:
         files = config.fs.ls(prefix, detail=False)
     except (FileNotFoundError, IsADirectoryError):
@@ -68,7 +68,7 @@ def existing_shards() -> dict:
 
 
 def shard_output_path(shard_idx: int) -> str:
-    return f"{config.DATA_PATH}shard_{shard_idx:05d}.parquet"
+    return f"{config.SHARDS_PATH}shard_{shard_idx:05d}.parquet"
 
 
 def upload_figure(fig_s3: str, data: bytes) -> bool:
@@ -210,7 +210,7 @@ def main():
 
     logger.info(
         f"Step 2 done: {total_ok} documents OK, {total_err} with errors, "
-        f"shards written to {config.DATA_PATH}"
+        f"shards written to {config.SHARDS_PATH}"
     )
 
 

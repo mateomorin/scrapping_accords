@@ -197,7 +197,7 @@ namespace variants and non-standard main parts — / embedded PowerPoint
 slides / ODF / pdf / rtf / html), structure, image triage. The kept images
 are uploaded to `data/figs/{cid}/`.
 
-Outputs: `data/shard_XXXXX.parquet` (500 docs/shard, checkpoint: a shard is
+Outputs: `data/shards/shard_XXXXX.parquet` (500 docs/shard, checkpoint: a shard is
 reprocessed only if incomplete — a `--limit` test does not block later
 runs) + `data/figs/`.
 
@@ -221,8 +221,8 @@ path. Consequences:
 - no S3 PUTs for figures (the slow part of `step2 --force`);
 - `data/ocr_results.jsonl` stays valid — figure ids are unchanged, so step 3
   does **not** need to re-OCR figures that were already processed;
-- a per-shard sidecar `data/shard_XXXXX.refreshed` records completion for
-  `--skip-complete` resume.
+- a per-shard sidecar `data/refreshed_shards/shard_XXXXX.refreshed` records
+  completion for `--skip-complete` resume.
 
 **Do not run step2b concurrently with an active step 3 run** (the shard
 parquet files are rewritten while step 3 may be reading them). After step2b:
@@ -262,7 +262,7 @@ OCR merge + writing of the consumable outputs:
 
 | File | Content |
 |---|---|
-| `data/final_shard_XXXXX.parquet` | full record per document (JSON) |
+| `data/final_shards/final_shard_XXXXX.parquet` | full record per document (JSON) |
 | `data/chunks.jsonl` | 1 chunk per section (+ TOC, preamble, signature per doc) |
 | `data/tables.jsonl` | 1 object per table (structured grid + md rendering) |
 | `logs/summary.json` | global statistics |

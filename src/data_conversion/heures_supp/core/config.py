@@ -40,6 +40,9 @@ OUTPUT_ROOT = "s3://mateomorin/legifrance/data_heures_supp/"
 DATA_PATH = OUTPUT_ROOT + "data/"
 LOGS_PATH = OUTPUT_ROOT + "logs/"
 FIGS_PATH = DATA_PATH + "figs/"  # figures kept by the triage (for step 3 OCR)
+SHARDS_PATH = DATA_PATH + "shards/"  # step 2 output: shard_XXXXX.parquet
+FINAL_SHARDS_PATH = DATA_PATH + "final_shards/"  # step 4 output: final_shard_XXXXX.parquet
+REFRESHED_SHARDS_PATH = DATA_PATH + "refreshed_shards/"  # step 2b sidecars: shard_XXXXX.refreshed
 
 # Sanctioned test-write zone (bounded, self-cleaning; see AGENTS.md "Test Integrity")
 TESTS_ROOT = "s3://mateomorin/legifrance/tests/"

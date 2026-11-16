@@ -53,12 +53,10 @@ def collect_queue(ocr_scanned: bool) -> list:
     items = []
     try:
         shard_files = [
-            f
-            for f in config.fs.ls(config.DATA_PATH, detail=False)
-            if "/shard_" in f and f.endswith(".parquet") and "final_shard" not in f
+            f for f in config.fs.ls(config.SHARDS_PATH, detail=False) if f.endswith(".parquet")
         ]
     except (FileNotFoundError, IsADirectoryError):
-        logger.error(f"No shards found in {config.DATA_PATH} (run step 2 first).")
+        logger.error(f"No shards found in {config.SHARDS_PATH} (run step 2 first).")
         return []
 
     for f in sorted(shard_files):

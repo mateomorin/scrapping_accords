@@ -5,7 +5,7 @@ from heures_supp.core import config, utils
 
 
 def test_allows_output_root():
-    path = f"{config.DATA_PATH}shard_00000.parquet"
+    path = f"{config.SHARDS_PATH}shard_00000.parquet"
     assert utils.safe_remote_path(path) == path
 
 

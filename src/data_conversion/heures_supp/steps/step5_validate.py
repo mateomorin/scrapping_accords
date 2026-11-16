@@ -41,13 +41,21 @@ REPORT_FILE = config.LOGS_PATH + "validation_report.json"
 def final_shards() -> list:
     """Shards to read: final_shard_* if step 4 has run, otherwise shard_*."""
     try:
-        files = config.fs.ls(config.DATA_PATH, detail=False)
+        finals = [
+            f
+            for f in config.fs.ls(config.FINAL_SHARDS_PATH, detail=False)
+            if f.endswith(".parquet")
+        ]
     except (FileNotFoundError, IsADirectoryError):
-        return []
-    finals = [f for f in files if "/final_shard_" in f and f.endswith(".parquet")]
+        finals = []
     if finals:
         return sorted(finals)
-    return sorted(f for f in files if "/shard_" in f and f.endswith(".parquet"))
+    try:
+        return sorted(
+            f for f in config.fs.ls(config.SHARDS_PATH, detail=False) if f.endswith(".parquet")
+        )
+    except (FileNotFoundError, IsADirectoryError):
+        return []
 
 
 def load_records(shard_files: list) -> pd.DataFrame:

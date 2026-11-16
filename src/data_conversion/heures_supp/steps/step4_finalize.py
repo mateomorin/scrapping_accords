@@ -2,7 +2,7 @@
 Step 4 - Finalization: OCR merge + RAG-consumable outputs.
 
 Reads the step 2 shards and data/ocr_results.jsonl, then writes:
-  data/final_shard_XXXXX.parquet  : full record per document (figures with ocr_md)
+  data/final_shards/final_shard_XXXXX.parquet : full record per document (figures with ocr_md)
   data/chunks.jsonl               : section chunks + TOC + preamble + signature
   data/tables.jsonl               : table objects (structured grid + md)
   logs/summary.json               : global statistics
@@ -52,13 +52,13 @@ def load_ocr_results() -> dict:
 
 
 def final_shard_path(idx: int) -> str:
-    return f"{config.DATA_PATH}final_shard_{idx:05d}.parquet"
+    return f"{config.FINAL_SHARDS_PATH}final_shard_{idx:05d}.parquet"
 
 
 def list_shards() -> list:
     files = [
         f
-        for f in config.fs.ls(config.DATA_PATH, detail=False)
+        for f in config.fs.ls(config.SHARDS_PATH, detail=False)
         if "/shard_" in f and f.endswith(".parquet") and "final_shard" not in f
     ]
     idxs = []
@@ -192,7 +192,7 @@ def main():
     all_tables = []
 
     for idx in shards:
-        df = pd.read_parquet(f"{config.DATA_PATH}shard_{idx:05d}.parquet", filesystem=config.fs)
+        df = pd.read_parquet(f"{config.SHARDS_PATH}shard_{idx:05d}.parquet", filesystem=config.fs)
         final_rows = []
         for _, row in df.iterrows():
             try:
@@ -275,7 +275,7 @@ def main():
         "figure_triage_reasons": dict(triage_reasons),
         "ocr": {"ok": ocr_ok, "pending_or_failed": ocr_err},
         "outputs": {
-            "shards": f"{config.DATA_PATH}final_shard_*.parquet",
+            "shards": f"{config.FINAL_SHARDS_PATH}final_shard_*.parquet",
             "chunks": CHUNKS_FILE,
             "tables": TABLES_FILE,
         },
