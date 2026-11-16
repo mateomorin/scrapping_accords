@@ -1,16 +1,17 @@
+"""Scrape ACCO metadata from the LegiFrance API, month by month."""
+
 import argparse
 import logging
 import time
 
+import config
 import httpx
 import numpy as np
 import pandas as pd
+from legifrance_api_client import LegiFranceClient
 from tqdm import tqdm
 
-import config
-from legifrance_api_client import LegiFranceClient
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
@@ -23,7 +24,7 @@ def parse_months(value):
         return "all"
 
     try:
-        months = [int(m.strip()) for m in value.replace(',', ' ').split()]
+        months = [int(m.strip()) for m in value.replace(",", " ").split()]
         for m in months:
             if not 1 <= m <= 12:
                 raise argparse.ArgumentTypeError(f"Month {m} must be set between 1 and 12.")
@@ -47,9 +48,7 @@ def parse_year(value):
 
 
 def retrieve_data(accos: list):
-    """
-    Extracts the useful information from the dict 'results' of the json.
-    """
+    """Extract the useful fields from the API 'results' list."""
     metadata_accos = []
 
     for acco in accos:
@@ -69,16 +68,14 @@ def retrieve_data(accos: list):
         metadata_to_keep["dateDiffusion"] = acco["dateDiffusion"]
         metadata_to_keep["conforme"] = acco["conforme"]
         for i, theme in enumerate(acco["themes"]):
-            metadata_to_keep[f"theme_{i+1}"] = theme
+            metadata_to_keep[f"theme_{i + 1}"] = theme
         metadata_accos.append(metadata_to_keep)
 
     return metadata_accos
 
 
 def end_of_month(year: int, month: int):
-    """
-    Returns the final day of the month for any month in any year.
-    """
+    """Return the last day of the month for any month in any year."""
     assert month in range(1, 13), ValueError("month is not valid")
     if month in [1, 3, 5, 7, 8, 10, 12]:
         return 31
@@ -93,7 +90,8 @@ def end_of_month(year: int, month: int):
 
 def download_metadata_with_retry(client, payload, pageNumber):
     """
-    Trying to download metadata for a specific payload, with retries.
+    Download metadata for a payload, with retries.
+
     401 errors often happen for some filters, so this allows multiple tries.
     Waiting time grows exponentially with each retry.
     """
@@ -120,10 +118,7 @@ def download_metadata_with_retry(client, payload, pageNumber):
 
 
 def check_data_length(metadata_list, theoretical_length):
-    """
-    Check for data length and for data id uniqueness.
-    """
-
+    """Check the data length and the uniqueness of the data ids."""
     # Validation
     if len(metadata_list) != theoretical_length:
         logger.warning("The displayed number of elements is not the same after scrapping.")
@@ -154,9 +149,9 @@ def create_sign_date_filter(year, month):
         {
             "dates": {
                 "start": f"{year:04d}-{month:02d}-01",
-                "end": f"{year:04d}-{month:02d}-{end_day:02d}"
+                "end": f"{year:04d}-{month:02d}-{end_day:02d}",
             },
-            "facette": "DATE_SIGNATURE"
+            "facette": "DATE_SIGNATURE",
         }
     ]
 
@@ -178,17 +173,17 @@ def download_metadata_filtered(filters: list):
             "fromAdvancedRecherche": False,
             "pageSize": 100,
             "typePagination": "DEFAUT",
-            "pageNumber": 1
+            "pageNumber": 1,
         },
-        "fond": "ACCO"
+        "fond": "ACCO",
     }
 
     # Retrieve the number of elements to validate at the end and compute max pages
     response = download_metadata_with_retry(client, payload, 1)[0]
     if not response:
         raise Exception("Requests for the number of results were unsuccesful")
-    totalResultNumber = response.json()['totalResultNumber']
-    max_pages = int(np.ceil(totalResultNumber/100))
+    totalResultNumber = response.json()["totalResultNumber"]
+    max_pages = int(np.ceil(totalResultNumber / 100))
 
     total_missed_attempts = 0
     total_status_code_errors = 0
@@ -197,10 +192,11 @@ def download_metadata_filtered(filters: list):
 
     # Iterate through pages
     for pageNumber in tqdm(range(1, max_pages + 1)):
-
         # Request a specific page
         payload["recherche"]["pageNumber"] = pageNumber
-        response, attempt, status_errors, req_errors = download_metadata_with_retry(client, payload, pageNumber)
+        response, attempt, status_errors, req_errors = download_metadata_with_retry(
+            client, payload, pageNumber
+        )
 
         # Update stats
         total_missed_attempts += attempt
@@ -240,8 +236,10 @@ def save_metadata_to_parquet(metadata, file_name):
 
 def scrap_all_acco():
     """
-    Scrap all ACCO metadata from 2017/09/01 (ACCO creation) to 2025/12/31.
-    Be careful, the save only arrives at the end, a simple error might make you lose all data.
+    Scrape all ACCO metadata from 2017/09/01 (ACCO creation) to 2025/12/31.
+
+    Warning: the save only happens at the end, so a simple error might lose
+    all data.
     """
     all_acco_metadata = []
 
@@ -274,7 +272,7 @@ def scrap_specific_months(year, months):
         filename = f"acco_metadata_{year}"
     else:
         assert isinstance(months, list)
-        filename = f"acco_metadata_{year}_{"_".join(map(str, months))}"
+        filename = f"acco_metadata_{year}_{'_'.join(map(str, months))}"
 
     for month in months:
         logger.info(f"------------------------ {year}/{month:02d} ----------------------------")
@@ -285,22 +283,15 @@ def scrap_specific_months(year, months):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Scrapping of ACCO by month and year"
-    )
+    parser = argparse.ArgumentParser(description="Scrapping of ACCO by month and year")
 
-    parser.add_argument(
-        "--year",
-        type=parse_year,
-        required=True,
-        help="Specific year or 'all'"
-    )
+    parser.add_argument("--year", type=parse_year, required=True, help="Specific year or 'all'")
 
     parser.add_argument(
         "--month",
         type=parse_months,
         default="all",
-        help="Month list (ex: '1,2,3' ou '1 2 3') or 'all' (default: 'all')"
+        help="Month list (ex: '1,2,3' or '1 2 3') or 'all' (default: 'all')",
     )
 
     args = parser.parse_args()

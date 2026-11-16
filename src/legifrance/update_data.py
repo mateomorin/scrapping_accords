@@ -1,28 +1,31 @@
+"""Incremental update of the ACCO metadata parquet (and optionally the documents)."""
+
 import argparse
 import asyncio
 import logging
 
+import config
 import numpy as np
 import pandas as pd
-
-import config
 import scrap_metadata
 import scrap_texts
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def fetch_update_dates(parquet_path: str):
     """
-    Init a dictionary describing the parquet at parquet_path with the following keys:
-        - min_diff_month: last month of update in the parquet
-        - min_diff_year: last year of update in the parquet
-        - min_sign_month: first month of dateSignature in the parquet
-        - min_sign_year: first year of dateSignature in the parquet
-        - max_sign_month: last month of dateSignature in the parquet
-        - max_sign_year: last year of dateSignature in the parquet
+    Initialize a dictionary describing the parquet at parquet_path.
+
+    Keys:
+    - min_diff_month: last month of update in the parquet
+    - min_diff_year: last year of update in the parquet
+    - min_sign_month: first month of dateSignature in the parquet
+    - min_sign_year: first year of dateSignature in the parquet
+    - max_sign_month: last month of dateSignature in the parquet
+    - max_sign_year: last year of dateSignature in the parquet
 
     The dictionary will be updated with new keys in update_data().
     """
@@ -49,7 +52,8 @@ def fetch_update_dates(parquet_path: str):
 def fetch_new_metadata(dates: dict):
     """
     Find new metadata that has been shared but not yet downloaded.
-    Search for them only in the desired time interval.
+
+    The search is restricted to the desired time interval.
     """
     max_sign_end_day = scrap_metadata.end_of_month(dates["max_sign_year"], dates["max_sign_month"])
     max_diff_end_day = scrap_metadata.end_of_month(dates["max_diff_year"], dates["max_diff_year"])
@@ -62,20 +66,8 @@ def fetch_new_metadata(dates: dict):
 
     # Payload for /search
     date_filters = [
-        {
-            "dates": {
-                "start": start_sign,
-                "end": end_sign
-            },
-            "facette": "DATE_SIGNATURE"
-        },
-        {
-            "dates": {
-                "start": start_diff,
-                "end": end_diff
-                },
-            "facette": "DATE_DIFFUSION"
-        }
+        {"dates": {"start": start_sign, "end": end_sign}, "facette": "DATE_SIGNATURE"},
+        {"dates": {"start": start_diff, "end": end_diff}, "facette": "DATE_DIFFUSION"},
     ]
 
     new_metadata = scrap_metadata.download_metadata_filtered(date_filters)
@@ -115,12 +107,7 @@ def group_ids_by_month(ids: np.ndarray, sign_dates: np.ndarray):
     return grouped_ids
 
 
-def update_data(
-    max_diff_year,
-    max_diff_month,
-    parquet_path,
-    update_docx
-):
+def update_data(max_diff_year, max_diff_month, parquet_path, update_docx):
     """
     Collect new metadata (always) and documents (if update_docx) and update the databases.
     """
@@ -129,10 +116,14 @@ def update_data(
     dates["max_diff_year"] = max_diff_year
     dates["max_diff_month"] = max_diff_month
 
-    assert dates["max_diff_year"] >= dates["min_diff_year"], ValueError("The metadata is already updated for that year")
+    assert dates["max_diff_year"] >= dates["min_diff_year"], ValueError(
+        "The metadata is already updated for that year"
+    )
 
     if dates["max_diff_year"] == dates["min_diff_year"]:
-        assert dates["max_diff_month"] >= dates["min_diff_month"], ValueError("The metadata is already updated for that month")
+        assert dates["max_diff_month"] >= dates["min_diff_month"], ValueError(
+            "The metadata is already updated for that month"
+        )
 
     new_metadata = fetch_new_metadata(dates)
 
@@ -147,35 +138,29 @@ def update_data(
 
         # Fetch and export
         for sign_date, ids_to_consult in grouped_ids.items():
-            scrap_texts.context_vars["year"], scrap_texts.context_vars["month"] = sign_date.split("-")
+            scrap_texts.context_vars["year"], scrap_texts.context_vars["month"] = sign_date.split(
+                "-"
+            )
             documents = fetch_missing_doc_data(ids_to_consult)
             scrap_texts.upload_batch_to_s3(documents=documents)
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Scrapping of ACCO by month and year"
-    )
+    parser = argparse.ArgumentParser(description="Scrapping of ACCO by month and year")
 
     parser.add_argument(
         "--parquet_path",
         type=str,
         required=True,
-        help="Path to the parquet containing the metadata you want to update"
+        help="Path to the parquet containing the metadata you want to update",
     )
 
     parser.add_argument(
-        "--max_diff_year",
-        type=int,
-        required=True,
-        help="Maximum year desired for the update"
+        "--max_diff_year", type=int, required=True, help="Maximum year desired for the update"
     )
 
     parser.add_argument(
-        "--max_diff_month",
-        type=int,
-        required=True,
-        help="Maximum month desired for the update"
+        "--max_diff_month", type=int, required=True, help="Maximum month desired for the update"
     )
 
     parser.add_argument(
@@ -183,7 +168,7 @@ def main():
         type=bool,
         required=False,
         default=True,
-        help="Download the new documents in the document directory set in config"
+        help="Download the new documents in the document directory set in config",
     )
 
     args = parser.parse_args()
@@ -192,8 +177,8 @@ def main():
         max_diff_year=args.max_diff_year,
         max_diff_month=args.max_diff_month,
         parquet_path=args.parquet_path,
-        update_docx=args.update_docx
-        )
+        update_docx=args.update_docx,
+    )
 
 
 if __name__ == "__main__":

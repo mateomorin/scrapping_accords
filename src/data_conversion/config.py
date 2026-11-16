@@ -1,5 +1,8 @@
+"""Shared configuration for the docx -> markdown conversion pipeline (S3, LLM, converters)."""
+
 import os
 
+import s3fs
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import (
     VlmConvertOptions,
@@ -11,7 +14,6 @@ from docling.pipeline.vlm_pipeline import VlmPipeline
 from dotenv import load_dotenv
 from markitdown import MarkItDown
 from openai import OpenAI
-import s3fs
 
 load_dotenv(override=True)
 
@@ -37,7 +39,7 @@ Veille à respecter l'ortographe, la syntaxe et la police de caractère (gras, i
 Si l'image comporte un schéma, décris ce schéma.
 
 TOUT DOIT ÊTRE ECRIT EN FORMAT MARKDOWN
-"""
+"""  # noqa: E501
 
 llm_client = OpenAI(
     base_url=os.environ["LLM_API_URL"],
@@ -52,9 +54,7 @@ llm_converter = MarkItDown(
     llm_prompt=LLM_PROMPT,
 )
 
-basic_converter = MarkItDown(
-    enable_plugins=False
-)
+basic_converter = MarkItDown(enable_plugins=False)
 
 # Docling LLM converter
 engine_options = ApiVlmEngineOptions(
@@ -66,7 +66,7 @@ engine_options = ApiVlmEngineOptions(
         "temperature": 0.0,
     },
     timeout=120,
-    concurrency=5
+    concurrency=5,
 )
 
 vlm_options = VlmConvertOptions.from_preset(

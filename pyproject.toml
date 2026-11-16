@@ -9,6 +9,7 @@ dependencies = [
     "docling>=2.130.0",
     "docx2pdf>=0.1.8",
     "httpx>=0.28.1",
+    "imagehash>=4.3.2",
     "ipython>=9.17.1",
     "markitdown-ocr>=0.1.0",
     "markitdown[docx]",
@@ -18,10 +19,12 @@ dependencies = [
     "playwright>=1.62.0",
     "pyarrow>=25.0.1",
     "pylegifrance>=1.7.1",
+    "pypdf>=7.0.1",
     "python-docx>=1.2.0",
     "python-dotenv>=1.2.3",
     "requests>=2.34.2",
     "s3fs>=2026.7.0",
+    "striprtf>=0.0.35",
     "tqdm>=4.70.1",
 ]
 
@@ -29,3 +32,47 @@ dependencies = [
 members = [
     "markitdown/packages/markitdown",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "ruff>=0.17.5",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+extend-exclude = ["notebooks"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src/data_conversion"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # Pyflakes
+    "I",   # isort (gestion des imports)
+    "D",   # pydocstyle (gestion des docstrings)
+    "BLE", # flake8-blind-except (contrôle des except Exception)
+]
+
+ignore = [
+    # Authorize "except Exception"
+    "BLE001",
+    
+    # Ignore compulsory docstrings for very simple functions
+    "D103",
+
+    # Authorize short docstrings on multiple lines
+    "D200",
+
+    # Authorize line jump after """
+    "D212",
+
+    # No blankline before docstring in class
+    "D203"
+]
+
+[tool.ruff.format]
+indent-style = "space"
+quote-style = "double"
