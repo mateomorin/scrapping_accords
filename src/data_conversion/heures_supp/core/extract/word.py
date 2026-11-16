@@ -1,6 +1,8 @@
 """
-Deterministic extraction of blocks (paragraphs, tables, images, embedded
-objects) from a DOCX file, at the zip/XML level (lxml).
+Deterministic block extraction from a DOCX file (zip/XML level, lxml).
+
+Paragraphs, tables, images and embedded objects are recovered directly from
+the raw parts.
 
 Why not python-docx? It does not expose embedded OLE objects (e.g. embedded
 PowerPoint slides), which are nonetheless the main content of some agreements.
@@ -19,16 +21,18 @@ Robustness:
 - the XML is parsed in "recover" mode to tolerate invalid PCDATA characters
   (control characters).
 """
+
 import io
 import os
 import zipfile
+
 from lxml import etree
 
 # Default values (standard OOXML variants)
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 V = "urn:schemas-microsoft-com:vml"
-O = "urn:schemas-microsoft-com:office:office"
+OFFICE = "urn:schemas-microsoft-com:office:office"
 A = "http://schemas.openxmlformats.org/drawingml/2006/main"
 WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
 
@@ -36,13 +40,13 @@ WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
 class _Ns:
     """Namespaces resolved for a given document."""
 
-    __slots__ = ("W", "R", "V", "O", "A", "WP")
+    __slots__ = ("W", "R", "V", "OFFICE", "A", "WP")
 
     def __init__(self, nsmap: dict):
         self.W = nsmap.get("w") or W
         self.R = nsmap.get("r") or R
         self.V = nsmap.get("v") or V
-        self.O = nsmap.get("o") or O
+        self.OFFICE = nsmap.get("o") or OFFICE
         self.A = nsmap.get("a") or A
         self.WP = nsmap.get("wp") or WP
 
@@ -51,7 +55,7 @@ class _Ns:
 
 
 def parse_rels(zf: zipfile.ZipFile, rels_path: str) -> dict:
-    """rId -> {'type': str (last segment), 'target': str}."""
+    """Parse a .rels part; return a map rId -> {'type', 'target'}."""
     out = {}
     try:
         xml = zf.read(rels_path)
@@ -70,7 +74,8 @@ def parse_rels(zf: zipfile.ZipFile, rels_path: str) -> dict:
 
 def _find_main_part(zf: zipfile.ZipFile) -> str:
     """
-    Main document part (normally word/document.xml).
+    Find the main document part (normally word/document.xml).
+
     Discovered via the officeDocument relation of _rels/.rels; some
     files have word/document2.xml or similar.
     """
@@ -106,11 +111,11 @@ def _resolve_part(target: str, base_dir: str) -> str:
 
 
 def _media_index(zf: zipfile.ZipFile, prefix: str) -> dict:
-    """part -> {'size', 'fmt'} for the media/ parts of a zip."""
+    """Map media/ part names to {'size', 'fmt'} for a zip."""
     out = {}
     for name in zf.namelist():
         if name.startswith(prefix):
-            base = name[len(prefix):]
+            base = name[len(prefix) :]
             fmt = base.rsplit(".", 1)[-1].lower() if "." in base else ""
             try:
                 size = zf.getinfo(name).file_size
@@ -155,7 +160,8 @@ def _run_features(ns: _Ns, r: etree._Element) -> tuple:
 
 def _style_outlines(zf: zipfile.ZipFile, ns: _Ns) -> dict:
     """
-    styleId -> outline level (1-based) defined in word/styles.xml.
+    Map styleId to its outline level (1-based) from word/styles.xml.
+
     Built-in Word styles ("Titre 1", "Heading1", ...) carry their
     w:outlineLvl in the style, not in each paragraph.
     """
@@ -180,8 +186,14 @@ def _style_outlines(zf: zipfile.ZipFile, ns: _Ns) -> dict:
     return out
 
 
-def parse_para(ns: _Ns, p: etree._Element, rels: dict, zf: zipfile.ZipFile,
-               base_dir: str, style_outlines: dict | None = None) -> dict:
+def parse_para(
+    ns: _Ns,
+    p: etree._Element,
+    rels: dict,
+    zf: zipfile.ZipFile,
+    base_dir: str,
+    style_outlines: dict | None = None,
+) -> dict:
     text_parts = []
     bold_chars = u_chars = caps_chars = 0
     total = 0
@@ -230,7 +242,7 @@ def parse_para(ns: _Ns, p: etree._Element, rels: dict, zf: zipfile.ZipFile,
     obj_preview_rids = set()
     for obj in p.iter(ns.q("W", "object")):
         entry = None
-        ole = obj.find(f".//{ns.q('O', 'OLEObject')}")
+        ole = obj.find(f".//{ns.q('OFFICE', 'OLEObject')}")
         rid = ole.get(ns.q("R", "id")) if ole is not None else None
         if rid and rid in rels:
             entry = {"part": _resolve_part(rels[rid]["target"], base_dir), "preview": None}
@@ -331,8 +343,10 @@ def _xml_recover(data: bytes) -> etree._Element:
 
 def extract_docx(data: bytes) -> dict:
     """
-    Returns {"blocks", "info", "zf"}.
-    zf is kept open: embedded parts (.sldx...) are read from it later.
+    Extract the block list from a DOCX file.
+
+    Returns {"blocks", "info", "zf"}. zf is kept open: embedded parts
+    (.sldx...) are read from it later.
     """
     zf = zipfile.ZipFile(io.BytesIO(data))
     main_part = _find_main_part(zf)
@@ -358,8 +372,10 @@ def extract_docx(data: bytes) -> dict:
     # --- inventory of header/footer images (never OCR'd) ---
     hf_parts = set()
     for name in zf.namelist():
-        if (name.startswith(f"{base_dir}/_rels/header") or name.startswith(f"{base_dir}/_rels/footer")) \
-                and name.endswith(".rels"):
+        if (
+            name.startswith(f"{base_dir}/_rels/header")
+            or name.startswith(f"{base_dir}/_rels/footer")
+        ) and name.endswith(".rels"):
             for rel in parse_rels(zf, name).values():
                 if rel["type"] == "image":
                     hf_parts.add(_resolve_part(rel["target"], base_dir))
@@ -375,9 +391,7 @@ def extract_docx(data: bytes) -> dict:
         "n_header_footer_images": len(hf_parts),
         "media": _media_index(zf, f"{base_dir}/media/"),
         "embedded_parts": embedded_parts,
-        "has_ppt_embed": any(
-            p.lower().endswith((".sldx", ".pptx")) for p in embedded_parts
-        ),
+        "has_ppt_embed": any(p.lower().endswith((".sldx", ".pptx")) for p in embedded_parts),
         "main_part": main_part,
     }
     return {"blocks": blocks, "info": doc_info, "zf": zf}

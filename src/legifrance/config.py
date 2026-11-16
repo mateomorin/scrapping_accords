@@ -1,3 +1,5 @@
+"""S3 and API configuration for the LegiFrance scrapers."""
+
 import s3fs
 
 fs = s3fs.S3FileSystem(
@@ -6,8 +8,8 @@ fs = s3fs.S3FileSystem(
 )
 
 # API calls
-MAX_RETRIES = 5         # all
-MAX_CONCURRENCY = 10    # async
+MAX_RETRIES = 5  # all
+MAX_CONCURRENCY = 10  # async
 
 # Storage
 METADATA_PATH = "s3://mateomorin/legifrance/metadata/"

@@ -8,6 +8,7 @@ Text / table / image extraction from PDF.
 A "scanned" PDF (no text layer) is detected (scanned=True): in that case
 only the full LLM pipeline (step 3, --ocr-scanned) can exploit it.
 """
+
 import io
 
 import pdfplumber
@@ -51,59 +52,58 @@ def _line_features(page) -> list:
 
 
 def extract_pdf(data: bytes) -> dict:
-    pdf = pdfplumber.open(io.BytesIO(data))
     pages = []
     total_chars = 0
-    for pageno, page in enumerate(pdf.pages):
-        text = page.extract_text() or ""
-        total_chars += len(text)
-        tables = []
-        try:
-            for t in page.extract_tables():
-                grid = [[(c or "").strip() for c in row] for row in t]
-                if grid:
-                    tables.append(
-                        {
-                            "type": "table",
-                            "grid": grid,
-                            "spans": [[1] * len(row) for row in grid],
-                            "vmerge": [[None] * len(row) for row in grid],
-                            "n_rows": len(grid),
-                            "n_cols": len(grid[0]),
-                        }
-                    )
-        except Exception:
-            pass
-        pages.append(
-            {
-                "page": pageno + 1,
-                "lines": _line_features(page),
-                "tables": tables,
-                "n_images": len(page.images or []),
-            }
-        )
-    n_pages = len(pdf.pages)
-    pdf.close()
+    with pdfplumber.open(io.BytesIO(data)) as pdf:
+        for pageno, page in enumerate(pdf.pages):
+            text = page.extract_text() or ""
+            total_chars += len(text)
+            tables = []
+            try:
+                for t in page.extract_tables():
+                    grid = [[(c or "").strip() for c in row] for row in t]
+                    if grid:
+                        tables.append(
+                            {
+                                "type": "table",
+                                "grid": grid,
+                                "spans": [[1] * len(row) for row in grid],
+                                "vmerge": [[None] * len(row) for row in grid],
+                                "n_rows": len(grid),
+                                "n_cols": len(grid[0]),
+                            }
+                        )
+            except Exception:
+                pass
+            pages.append(
+                {
+                    "page": pageno + 1,
+                    "lines": _line_features(page),
+                    "tables": tables,
+                    "n_images": len(page.images or []),
+                }
+            )
+        n_pages = len(pdf.pages)
 
     images = []
     try:
-        reader = PdfReader(io.BytesIO(data))
-        for pageno, page in enumerate(reader.pages):
-            try:
-                imgs = list(page.images)
-            except Exception:
-                continue
-            for img in imgs:
-                name = img.name or "image.png"
-                images.append(
-                    {
-                        "page": pageno + 1,
-                        "name": name,
-                        "data": img.data,
-                        "fmt": name.rsplit(".", 1)[-1].lower() if "." in name else "png",
-                        "size": len(img.data),
-                    }
-                )
+        with PdfReader(io.BytesIO(data)) as reader:
+            for pageno, page in enumerate(reader.pages):
+                try:
+                    imgs = list(page.images)
+                except Exception:
+                    continue
+                for img in imgs:
+                    name = img.name or "image.png"
+                    images.append(
+                        {
+                            "page": pageno + 1,
+                            "name": name,
+                            "data": img.data,
+                            "fmt": name.rsplit(".", 1)[-1].lower() if "." in name else "png",
+                            "size": len(img.data),
+                        }
+                    )
     except Exception:
         pass
 

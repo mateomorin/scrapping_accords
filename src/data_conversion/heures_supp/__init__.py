@@ -1,6 +1,7 @@
 """
-Structure-aware conversion pipeline for the "Heures supplémentaires
-(contingent, majoration)" subset of French company agreements.
+Structure-aware conversion pipeline for French company agreements.
+
+Target subset: "Heures supplémentaires (contingent, majoration)".
 
 Layout:
     core/     shared library (config, utils, structure, triage,

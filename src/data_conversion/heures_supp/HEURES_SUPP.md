@@ -33,7 +33,6 @@ objects, per-document TOC). **No RAG logic here.**
 heures_supp/
 ├── __init__.py
 ├── HEURES_SUPP.md          # this document (data contract)
-├── selftest.py             # local self-test (no S3, no VLM)
 ├── core/                   # shared library (no CLI entry points)
 │   ├── config.py           # S3 paths, LLM settings, triage thresholds
 │   ├── utils.py            # safe S3 writes, sniffing, OCR, hashing
@@ -84,7 +83,7 @@ Reason: a `TITRE` has a **scope** — the articles that follow it belong to
 it. With the offset, `TITRE I` stays at L1 (base 0) and `Article 1` moves
 to L2 under its TITRE parent. Without any container in the document,
 `offset = 0` and the levels are **unchanged** compared to the base rule
-(invariance guarantee tested in the selftest).
+(invariance guarantee tested in tests/test_doc_process.py).
 
 **Native levels**: if the format encodes an explicit level, it is used as
 is (no offset): Word `w:outlineLvl` (directly on the paragraph or carried
@@ -101,8 +100,8 @@ therefore (a) never applies the "long" penalty when an explicit numbering
 signal is present (article / roman / letter / decimal), and (b) grants the
 decimal bonus to a long line when it is fully bold (bold fraction ≥ 0.8). A
 long numbered line that is *not* bold (a body sentence that merely starts
-with a number) still scores 0 and is not a heading (selftest ex8 covers both
-cases).
+with a number) still scores 0 and is not a heading (both cases are covered by
+the ex8 pytest case in tests/test_doc_process.py).
 
 **Sommaire / table of contents**: many agreements open with a `SOMMAIRE` /
 `TABLE DES MATIÈRES` whose entries copy the real part titles and append a
@@ -125,7 +124,7 @@ Real part titles keep their clean form (no glued page number, e.g.
 `1.3.1. Substitution.` or `ARTICLE 1 – OBJET, …AVENANT`) and are still
 detected; the TOC entries collapse into the body of the `SOMMAIRE` section,
 which is lossless (the references are preserved, just no longer fake sections).
-Selftest ex9 covers the short, bold-CAPS-`ARTICLE`, and trailing-period cases.
+The ex9 pytest case (tests/test_doc_process.py) covers the short, bold-CAPS-`ARTICLE`, and trailing-period cases.
 
 The section created by the TOC anchor (`SOMMAIRE` / `TABLE DES MATIÈRES`)
 carries an `is_toc: true` flag (on both `sections` and the flat `toc` list);
@@ -368,12 +367,14 @@ The raw documents are heterogeneous; the extractor handles:
 - PDF images are placed at the end of the document (no reliable position
   in the text stream).
 
-## Local self-test (no S3)
+## Tests (no S3, no LLM, no network)
 
 ```bash
-uv run src/data_conversion/heures_supp/selftest.py
+uv run pytest
 ```
 
-Validates the extractor on `example_data/` (classic Word, Word + 42
-embedded PPT slides, corrupted docx, PDF) plus synthetic documents for the
-TITRE/ARTICLE level hierarchy.
+`tests/test_doc_process.py` validates the extractor on `example_data/`
+(classic Word, Word + 42 embedded PPT slides, corrupted docx, PDF) plus
+synthetic documents for the TITRE/ARTICLE level hierarchy, the long numbered
+heading rule, and the sommaire/TOC handling. `tests/test_utils.py` covers
+the S3 write-zone guard (`safe_remote_path`).

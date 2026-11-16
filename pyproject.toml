@@ -40,8 +40,12 @@ dev = [
 ]
 
 [tool.ruff]
-line-length = 120
+line-length = 100
 target-version = "py313"
+extend-exclude = ["notebooks"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src/data_conversion"]
 
 [tool.ruff.lint]
 select = [

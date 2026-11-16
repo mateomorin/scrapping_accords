@@ -11,8 +11,10 @@ extension forced by the scraper. ODF is flat, readable XML:
 
 Returns the same block model as extract word / slides.
 """
+
 import io
 import zipfile
+
 from lxml import etree
 
 OFFICE = "urn:oasis:names:tc:opendocument:xmlns:office:1.0"
@@ -40,12 +42,13 @@ class _Ns:
         return f"{{{getattr(self, which)}}}{tag}"
 
 
-def _style_map(zf: zipfile.ZipFile, content_root: etree._Element, ns: _Ns,
-               parser: etree.XMLParser) -> dict:
+def _style_map(
+    zf: zipfile.ZipFile, content_root: etree._Element, ns: _Ns, parser: etree.XMLParser
+) -> dict:
     """
-    style-name -> {'bold': bool, 'underline': bool, 'size_pt': float|None,
-    'outline': int|None} for text styles (content.xml automatic-styles
-    + styles.xml).
+    Map style names to their text-style attributes (bold, underline, size, outline).
+
+    Sources: content.xml automatic-styles and styles.xml.
     """
     out = {}
 
@@ -56,7 +59,9 @@ def _style_map(zf: zipfile.ZipFile, content_root: etree._Element, ns: _Ns,
             name = st.get(ns.q("style", "name"))
             if name is None:
                 continue
-            entry = out.setdefault(name, {"bold": False, "underline": False, "size_pt": None, "outline": None})
+            entry = out.setdefault(
+                name, {"bold": False, "underline": False, "size_pt": None, "outline": None}
+            )
             fw = st.find(ns.q("fo", "font-weight"))
             if fw is not None and fw.get("text") in ("bold", "bolder"):
                 entry["bold"] = True
@@ -81,7 +86,9 @@ def _style_map(zf: zipfile.ZipFile, content_root: etree._Element, ns: _Ns,
             name = st.get(ns.q("style", "name"))
             if name is None:
                 continue
-            entry = out.setdefault(name, {"bold": False, "underline": False, "size_pt": None, "outline": None})
+            entry = out.setdefault(
+                name, {"bold": False, "underline": False, "size_pt": None, "outline": None}
+            )
             fw = st.find(ns.q("fo", "font-weight"))
             if fw is not None and fw.get("text") in ("bold", "bolder"):
                 entry["bold"] = True
@@ -106,8 +113,9 @@ def _style_map(zf: zipfile.ZipFile, content_root: etree._Element, ns: _Ns,
     return out
 
 
-def _para_block(ns: _Ns, el: etree._Element, style_map: dict,
-                is_list: bool, outline_lvl: int | None) -> dict:
+def _para_block(
+    ns: _Ns, el: etree._Element, style_map: dict, is_list: bool, outline_lvl: int | None
+) -> dict:
     text = "".join(el.itertext())
     bold_chars = u_chars = 0
     for span in el.iter(ns.q("text", "span")):
@@ -163,9 +171,7 @@ def _table_block(ns: _Ns, tbl: etree._Element) -> dict:
                     nr = int(cell.get(ns.q("table", "number-rows-spanned")) or 1)
                 except ValueError:
                     nr = 1
-                txt = "\n".join(
-                    "".join(p.itertext()) for p in cell.iter(ns.q("text", "p"))
-                ).strip()
+                txt = "\n".join("".join(p.itertext()) for p in cell.iter(ns.q("text", "p"))).strip()
                 row_text.append(txt)
                 row_span.append(nc)
                 row_rs.append(nr)
@@ -210,6 +216,8 @@ def _figures_in(ns: _Ns, el: etree._Element, zf: zipfile.ZipFile) -> list:
 
 def extract_odf(data: bytes) -> dict:
     """
+    Extract the block list from an ODF file.
+
     Returns {"blocks", "info", "zf"} (same shape as extract_docx).
     """
     zf = zipfile.ZipFile(io.BytesIO(data))
@@ -220,7 +228,7 @@ def extract_odf(data: bytes) -> dict:
     ns = _Ns(root.nsmap or {})
     style_map = _style_map(zf, root, ns, parser)
 
-    body = root.find(f"{ns.q('office','body')}/{ns.q('office','text')}")
+    body = root.find(f"{ns.q('office', 'body')}/{ns.q('office', 'text')}")
     if body is None:
         raise ValueError("content.xml has no office:text (non-textual ODF file?)")
 
@@ -242,7 +250,9 @@ def extract_odf(data: bytes) -> dict:
                 # carried by the paragraph style (paragraph-properties
                 # text:outline-level in styles.xml / automatic-styles).
                 st = style_map.get(child.get(ns.q("text", "style-name")) or "")
-                blocks.append(_para_block(ns, child, style_map, in_list, st.get("outline") if st else None))
+                blocks.append(
+                    _para_block(ns, child, style_map, in_list, st.get("outline") if st else None)
+                )
             elif tag == ns.q("text", "list"):
                 walk(child, True)
             elif tag == ns.q("text", "list-item"):

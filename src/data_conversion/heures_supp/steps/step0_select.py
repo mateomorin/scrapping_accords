@@ -12,6 +12,7 @@ Columns: cid, reference, title, legalStatus, nature, dateSignature,
 Run:
     uv run src/data_conversion/heures_supp/steps/step0_select.py
 """
+
 import logging
 import os
 import sys
@@ -40,10 +41,7 @@ def to_bool(v):
 
 
 def main():
-    files = [
-        f for f in config.fs.ls(config.METADATA_PATH, detail=False)
-        if f.endswith(".parquet")
-    ]
+    files = [f for f in config.fs.ls(config.METADATA_PATH, detail=False) if f.endswith(".parquet")]
     logger.info(f"{len(files)} metadata files found in {config.METADATA_PATH}")
 
     frames = []
@@ -85,8 +83,16 @@ def main():
     )
 
     keep = [
-        "cid", "reference", "title", "legalStatus", "nature",
-        "dateSignature", "dateDiffusion", "YYYY", "MM", "docx_path",
+        "cid",
+        "reference",
+        "title",
+        "legalStatus",
+        "nature",
+        "dateSignature",
+        "dateDiffusion",
+        "YYYY",
+        "MM",
+        "docx_path",
         "__source_file",
     ] + list(config.THEME_COLUMNS)
     keep = [c for c in keep if c in sel.columns]

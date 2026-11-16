@@ -1,5 +1,6 @@
 """
-Text / table / image extraction from an embedded PowerPoint package:
+Extract text, tables and images from an embedded PowerPoint package.
+
 - .sldx  : single-slide package (the typical case of OLE objects in the
            ACCO docx: word/embeddings/Microsoft_PowerPoint_SlideN.sldx)
 - .pptx  : classic multi-slide presentation
@@ -8,22 +9,28 @@ The text is recovered directly from the XML (a:t), without OCR: it is
 lossless and free. PowerPoint tables (a:tbl) are real grids with merges
 (gridSpan / rowSpan).
 """
+
 import io
 import zipfile
+
 from lxml import etree
+
+from .word import parse_rels
 
 A = "http://schemas.openxmlformats.org/drawingml/2006/main"
 P = "http://schemas.openxmlformats.org/presentationml/2006/main"
 R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
-# reuses parse_rels from the word module (same OOXML rels structure)
-from .word import parse_rels
-
 
 def _q(nsmap: dict, prefix: str, tag: str) -> str:
-    uri = nsmap.get(prefix) or {
-        "a": A, "p": P, "r": R,
-    }[prefix]
+    uri = (
+        nsmap.get(prefix)
+        or {
+            "a": A,
+            "p": P,
+            "r": R,
+        }[prefix]
+    )
     return f"{{{uri}}}{tag}"
 
 
@@ -41,9 +48,7 @@ def _slide_order(zf: zipfile.ZipFile) -> list:
                 order.append(target if target.startswith("ppt/") else "ppt/" + target)
         return order
     # single-slide package (.sldx): ppt/slides/slide1.xml
-    cands = sorted(
-        n for n in names if n.startswith("ppt/slides/slide") and n.endswith(".xml")
-    )
+    cands = sorted(n for n in names if n.startswith("ppt/slides/slide") and n.endswith(".xml"))
     return cands
 
 
@@ -169,6 +174,8 @@ def _parse_slide(zf: zipfile.ZipFile, part: str) -> list:
 
 def extract_ppt(data: bytes) -> dict:
     """
+    Extract the blocks from a .pptx or .sldx package.
+
     Returns {"slides": [ [blocks] ... ], "media": {part: {size, fmt}}}.
     media covers ppt/media/* of the WHOLE package (slides reference shared
     parts).

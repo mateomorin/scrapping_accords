@@ -1,10 +1,13 @@
 """
-Processing of a single document:
-  raw bytes -> sniffing -> deterministic extraction (docx/pptx/odf/pdf/rtf/html)
-  -> structure (sections) -> image triage -> structured record (JSON).
+Process a single document into a structured record (no LLM, no OCR).
 
-Used by steps/step2_extract.py (on S3) and selftest.py (local files).
+Pipeline: raw bytes -> sniffing -> deterministic extraction
+(docx/pptx/odf/pdf/rtf/html) -> structure (sections) -> image triage ->
+structured record (JSON).
+
+Used by steps/step2_extract.py (on S3) and the test suite (local files).
 """
+
 import json
 import logging
 
@@ -56,7 +59,7 @@ def _make_figure(fid, spec, origin, data, extra=None) -> dict:
 
 
 def _process_embedded(entry, zf, blocks, errors, stats, seen_hashes_holder) -> None:
-    """Expands an OLE object (PPT slides) or flags it as unreadable."""
+    """Expand an OLE object (PPT slides) into blocks, or flag it as unreadable."""
     part = entry.get("part") or ""
     low = part.lower()
     if low.endswith(PPT_EXT):
@@ -90,8 +93,12 @@ def _process_embedded(entry, zf, blocks, errors, stats, seen_hashes_holder) -> N
         # is the preview image (EMF/WMF) -> queue it for OCR.
         if entry.get("preview"):
             blocks.append(
-                {"kind": "figure", "origin": "ole_preview", "spec": entry["preview"],
-                 "data": _read_media(zf, entry["preview"])}
+                {
+                    "kind": "figure",
+                    "origin": "ole_preview",
+                    "spec": entry["preview"],
+                    "data": _read_media(zf, entry["preview"]),
+                }
             )
         stats["unreadable"].append(part)
     else:
@@ -121,8 +128,12 @@ def _process_odf(data: bytes) -> dict:
     # images (position not reliable in the stream: appended at the end)
     for spec in doc["figures"]:
         raw_blocks.append(
-            {"kind": "figure", "origin": "inline", "spec": spec,
-             "data": _read_media(zf, spec)}
+            {
+                "kind": "figure",
+                "origin": "inline",
+                "spec": spec,
+                "data": _read_media(zf, spec)
+            }
         )
     return {
         "format": "odt",
@@ -152,8 +163,12 @@ def _process_docx(data: bytes) -> dict:
                 _process_embedded(entry, zf, raw_blocks, errors, stats, None)
             for img in b.get("images", []):
                 raw_blocks.append(
-                    {"kind": "figure", "origin": "inline", "spec": img,
-                     "data": _read_media(zf, img)}
+                    {
+                        "kind": "figure",
+                        "origin": "inline",
+                        "spec": img,
+                        "data": _read_media(zf, img),
+                    }
                 )
         elif b["type"] == "table":
             raw_blocks.append(b)
@@ -187,8 +202,13 @@ def _process_pptx(data: bytes) -> dict:
                 except KeyError:
                     d = None
                 raw_blocks.append(
-                    {"kind": "figure", "origin": "slide", "spec": img, "data": d,
-                     "extra": {"slide": slide_idx}}
+                    {
+                        "kind": "figure",
+                        "origin": "slide",
+                        "spec": img,
+                        "data": d,
+                        "extra": {"slide": slide_idx},
+                    }
                 )
             elif sb["type"] == "slide_error":
                 errors.append(f"slide {sb['part']}: {sb['error']}")
@@ -210,9 +230,16 @@ def _process_pdf(data: bytes) -> dict:
     for page in pdf["pages"]:
         for line in page["lines"]:
             raw_blocks.append(
-                {"type": "para", "text": line["text"], "src": "pdf", "style": None,
-                 "feat": line["feat"], "images": [], "objects": [],
-                 "page": page["page"]}
+                {
+                    "type": "para",
+                    "text": line["text"],
+                    "src": "pdf",
+                    "style": None,
+                    "feat": line["feat"],
+                    "images": [],
+                    "objects": [],
+                    "page": page["page"],
+                }
             )
         for t in page["tables"]:
             t = dict(t)
@@ -222,9 +249,13 @@ def _process_pdf(data: bytes) -> dict:
     # they are appended at the end of the document.
     for img in pdf["images"]:
         raw_blocks.append(
-            {"kind": "figure", "origin": "pdf",
-             "spec": {"part": None, "fmt": img["fmt"], "size": img["size"]},
-             "data": img["data"], "extra": {"page": img["page"], "name": img["name"]}}
+            {
+                "kind": "figure",
+                "origin": "pdf",
+                "spec": {"part": None, "fmt": img["fmt"], "size": img["size"]},
+                "data": img["data"],
+                "extra": {"page": img["page"], "name": img["name"]},
+            }
         )
     scanned = pdf["scanned"]
     return {
@@ -246,8 +277,14 @@ def _process_rtf(data: bytes) -> dict:
         text = rtf_to_text(data.decode("utf-8", errors="ignore"))
     except Exception as e:
         return {
-            "format": "rtf", "doc_type": "unknown", "raw_blocks": [],
-            "errors": [f"rtf: {e}"], "stats": {}, "info": {}, "extra": {}, "data": data,
+            "format": "rtf",
+            "doc_type": "unknown",
+            "raw_blocks": [],
+            "errors": [f"rtf: {e}"],
+            "stats": {},
+            "info": {},
+            "extra": {},
+            "data": data,
         }
     raw_blocks = []
     for line in text.splitlines():
@@ -257,18 +294,33 @@ def _process_rtf(data: bytes) -> dict:
         letters = [c for c in line if c.isalpha()]
         raw_blocks.append(
             {
-                "type": "para", "text": line, "src": "rtf", "style": None,
+                "type": "para",
+                "text": line,
+                "src": "rtf",
+                "style": None,
                 "feat": {
-                    "caps": sum(1 for c in letters if c.isupper()) / len(letters) if letters else 0.0,
-                    "bold_frac": 0.0, "u_frac": 0.0, "size_pt": None,
-                    "is_list": False, "outline_lvl": None,
+                    "caps": sum(1 for c in letters if c.isupper()) / len(letters)
+                    if letters
+                    else 0.0,
+                    "bold_frac": 0.0,
+                    "u_frac": 0.0,
+                    "size_pt": None,
+                    "is_list": False,
+                    "outline_lvl": None,
                 },
-                "images": [], "objects": [],
+                "images": [],
+                "objects": [],
             }
         )
     return {
-        "format": "rtf", "doc_type": "rtf", "raw_blocks": raw_blocks,
-        "errors": [], "stats": {}, "info": {}, "extra": {}, "data": data,
+        "format": "rtf",
+        "doc_type": "rtf",
+        "raw_blocks": raw_blocks,
+        "errors": [],
+        "stats": {},
+        "info": {},
+        "extra": {},
+        "data": data,
     }
 
 
@@ -276,7 +328,9 @@ def _process_html(data: bytes) -> dict:
     import html as _html
     import re as _re
 
-    text = _re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", data.decode("utf-8", errors="ignore"))
+    text = _re.sub(
+        r"(?is)<(script|style)[^>]*>.*?</\1>", " ", data.decode("utf-8", errors="ignore")
+    )
     text = _re.sub(r"(?i)<br\s*/?>", "\n", text)
     text = _re.sub(r"(?i)</p>|</div>|</li>", "\n", text)
     text = _re.sub(r"<[^>]+>", "", text)
@@ -289,26 +343,42 @@ def _process_html(data: bytes) -> dict:
         letters = [c for c in line if c.isalpha()]
         raw_blocks.append(
             {
-                "type": "para", "text": line, "src": "html", "style": None,
+                "type": "para",
+                "text": line,
+                "src": "html",
+                "style": None,
                 "feat": {
-                    "caps": sum(1 for c in letters if c.isupper()) / len(letters) if letters else 0.0,
-                    "bold_frac": 0.0, "u_frac": 0.0, "size_pt": None,
-                    "is_list": False, "outline_lvl": None,
+                    "caps": sum(1 for c in letters if c.isupper()) / len(letters)
+                    if letters
+                    else 0.0,
+                    "bold_frac": 0.0,
+                    "u_frac": 0.0,
+                    "size_pt": None,
+                    "is_list": False,
+                    "outline_lvl": None,
                 },
-                "images": [], "objects": [],
+                "images": [],
+                "objects": [],
             }
         )
     return {
-        "format": "html", "doc_type": "html", "raw_blocks": raw_blocks,
-        "errors": [], "stats": {}, "info": {}, "extra": {}, "data": data,
+        "format": "html",
+        "doc_type": "html",
+        "raw_blocks": raw_blocks,
+        "errors": [],
+        "stats": {},
+        "info": {},
+        "extra": {},
+        "data": data,
     }
 
 
 # ------------------------------------------------------------------ pipeline
-def process_document_bytes(data: bytes, cid: str, reference: str,
-                           upload_figure=None, figs_base: str | None = None) -> dict:
+def process_document_bytes(
+    data: bytes, cid: str, reference: str, upload_figure=None, figs_base: str | None = None
+) -> dict:
     """
-    Processes the raw bytes of a document and returns the structured record.
+    Process the raw bytes of a document; return the structured record.
 
     upload_figure(fig_s3, bytes) is called for each image kept by the triage
     (None locally). figs_base: S3 prefix of the figures.
@@ -329,9 +399,14 @@ def process_document_bytes(data: bytes, cid: str, reference: str,
         proc = _process_html(data)
     else:
         proc = {
-            "format": fmt, "doc_type": "unknown", "raw_blocks": [],
-            "errors": [f"unrecognized format: {fmt}"], "stats": {}, "info": {},
-            "extra": {}, "data": data,
+            "format": fmt,
+            "doc_type": "unknown",
+            "raw_blocks": [],
+            "errors": [f"unrecognized format: {fmt}"],
+            "stats": {},
+            "info": {},
+            "extra": {},
+            "data": data,
         }
 
     raw_blocks = proc["raw_blocks"]
@@ -359,31 +434,42 @@ def process_document_bytes(data: bytes, cid: str, reference: str,
             tbl_id = f"T{table_n}"
             # Same NBSP normalization for cells (md and grid share it).
             grid = [[normalize_ws(c) for c in row] for row in (b.get("grid") or [])]
-            items.append({
-                "kind": "table", "id": tbl_id, "rattach": last_para_idx,
-                "grid": grid,
-                "spans": b.get("spans"),
-                "vmerge": b.get("vmerge"),
-                "n_rows": b.get("n_rows") or len(grid),
-                "n_cols": b.get("n_cols") or (len(grid[0]) if grid else 0),
-                "empty": _empty_table(grid),
-                "md": render_table_md(grid),
-                "context": (para_units[last_para_idx]["text"].strip()[:200]
-                            if last_para_idx is not None and para_units[last_para_idx]["text"].strip()
-                            else ""),
-                **({k: b[k] for k in ("page",) if k in b}),
-            })
+            items.append(
+                {
+                    "kind": "table",
+                    "id": tbl_id,
+                    "rattach": last_para_idx,
+                    "grid": grid,
+                    "spans": b.get("spans"),
+                    "vmerge": b.get("vmerge"),
+                    "n_rows": b.get("n_rows") or len(grid),
+                    "n_cols": b.get("n_cols") or (len(grid[0]) if grid else 0),
+                    "empty": _empty_table(grid),
+                    "md": render_table_md(grid),
+                    "context": (
+                        para_units[last_para_idx]["text"].strip()[:200]
+                        if last_para_idx is not None and para_units[last_para_idx]["text"].strip()
+                        else ""
+                    ),
+                    **({k: b[k] for k in ("page",) if k in b}),
+                }
+            )
         elif b.get("kind") == "figure":
             figure_n += 1
             fid = f"F{figure_n}"
             data_img = b.get("data")
-            fig = _make_figure(fid, b["spec"], b.get("origin") or "inline", data_img,
-                               extra=b.get("extra"))
+            fig = _make_figure(
+                fid, b["spec"], b.get("origin") or "inline", data_img, extra=b.get("extra")
+            )
             # triage (heuristics only)
             keep, reason = triage.triage_figure(fig, len(items), len(raw_blocks), seen_hashes)
             fig["triage"] = {"keep": keep, "reason": reason}
             if keep and upload_figure is not None and figs_base:
-                ext = fig["fmt"] if fig["fmt"] in ("png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "webp") else "bin"
+                ext = (
+                    fig["fmt"]
+                    if fig["fmt"] in ("png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "webp")
+                    else "bin"
+                )
                 fig_s3 = f"{figs_base}{cid}/{fid}.{ext}"
                 ok = upload_figure(fig_s3, data_img)
                 fig["fig_s3"] = fig_s3 if ok else None
@@ -408,32 +494,54 @@ def process_document_bytes(data: bytes, cid: str, reference: str,
 
     # --- record assembly ---
     toc = [
-        {"id": s["id"], "level": s["level"], "number": s["number"],
-         "title": s["title"], "confidence": s["confidence"],
-         "is_toc": s.get("is_toc", False)}
+        {
+            "id": s["id"],
+            "level": s["level"],
+            "number": s["number"],
+            "title": s["title"],
+            "confidence": s["confidence"],
+            "is_toc": s.get("is_toc", False),
+        }
         for s in tree["sections"]
     ]
     sections_out = []
     for s in tree["sections"]:
-        sections_out.append({
-            "id": s["id"], "level": s["level"], "number": s["number"],
-            "title": s["title"], "confidence": s["confidence"],
-            "evidence": s["evidence"], "parent": s["parent"],
-            "is_toc": s.get("is_toc", False),
-            "body_md": s["body_md"], "n_paras": s["n_paras"],
-            "table_ids": s["table_ids"], "figure_ids": s["figure_ids"],
-        })
+        sections_out.append(
+            {
+                "id": s["id"],
+                "level": s["level"],
+                "number": s["number"],
+                "title": s["title"],
+                "confidence": s["confidence"],
+                "evidence": s["evidence"],
+                "parent": s["parent"],
+                "is_toc": s.get("is_toc", False),
+                "body_md": s["body_md"],
+                "n_paras": s["n_paras"],
+                "table_ids": s["table_ids"],
+                "figure_ids": s["figure_ids"],
+            }
+        )
     root = tree["root"]
     tables_out = []
     figures_out = []
     for it in items:
         if it["kind"] == "table":
-            tables_out.append({
-                "id": it["id"], "section": it["sec_id"], "context": it["context"],
-                "n_rows": it["n_rows"], "n_cols": it["n_cols"], "empty": it["empty"],
-                "grid": it["grid"], "spans": it.get("spans"), "vmerge": it.get("vmerge"),
-                "md": it["md"], **({k: it[k] for k in ("page",) if k in it}),
-            })
+            tables_out.append(
+                {
+                    "id": it["id"],
+                    "section": it["sec_id"],
+                    "context": it["context"],
+                    "n_rows": it["n_rows"],
+                    "n_cols": it["n_cols"],
+                    "empty": it["empty"],
+                    "grid": it["grid"],
+                    "spans": it.get("spans"),
+                    "vmerge": it.get("vmerge"),
+                    "md": it["md"],
+                    **({k: it[k] for k in ("page",) if k in it}),
+                }
+            )
         elif it["kind"] == "figure":
             f = it["fig"]
             f = {k: v for k, v in f.items() if k != "data"}

@@ -12,6 +12,7 @@ Run:
     uv run src/data_conversion/heures_supp/steps/step1_profile.py
     uv run src/data_conversion/heures_supp/steps/step1_profile.py --sample 500 --seed 7
 """
+
 import argparse
 import logging
 import os
@@ -57,47 +58,47 @@ def deep_profile(row) -> dict:
             n_paras = sum(1 for b in blocks if b["type"] == "para")
             n_tables = sum(1 for b in blocks if b["type"] == "table")
             media = doc["info"]["media"]
-            out.update({
-                "n_paras": n_paras,
-                "n_tables": n_tables,
-                "n_ole": len(doc["info"]["embedded_parts"]),
-                "n_ppt_embed": int(doc["info"]["has_ppt_embed"]),
-                "n_media": len(media),
-                "media_bytes": sum(m["size"] for m in media.values()),
-                "n_hf_images": doc["info"]["n_header_footer_images"],
-            })
+            out.update(
+                {
+                    "n_paras": n_paras,
+                    "n_tables": n_tables,
+                    "n_ole": len(doc["info"]["embedded_parts"]),
+                    "n_ppt_embed": int(doc["info"]["has_ppt_embed"]),
+                    "n_media": len(media),
+                    "media_bytes": sum(m["size"] for m in media.values()),
+                    "n_hf_images": doc["info"]["n_header_footer_images"],
+                }
+            )
         elif fmt == "pptx":
             from heures_supp.core.extract import slides as extract_slides
 
             ppt = extract_slides.extract_ppt(data)
-            n_paras = sum(
-                1 for s in ppt["slides"] for b in s if b["type"] == "para"
+            n_paras = sum(1 for s in ppt["slides"] for b in s if b["type"] == "para")
+            n_tables = sum(1 for s in ppt["slides"] for b in s if b["type"] == "table")
+            n_figs = sum(1 for s in ppt["slides"] for b in s if b["type"] == "figure")
+            out.update(
+                {
+                    "n_slides": len(ppt["slides"]),
+                    "n_paras": n_paras,
+                    "n_tables": n_tables,
+                    "n_media": len(ppt["media"]),
+                    "media_bytes": sum(m["size"] for m in ppt["media"].values()),
+                    "n_slide_figs": n_figs,
+                }
             )
-            n_tables = sum(
-                1 for s in ppt["slides"] for b in s if b["type"] == "table"
-            )
-            n_figs = sum(
-                1 for s in ppt["slides"] for b in s if b["type"] == "figure"
-            )
-            out.update({
-                "n_slides": len(ppt["slides"]),
-                "n_paras": n_paras,
-                "n_tables": n_tables,
-                "n_media": len(ppt["media"]),
-                "media_bytes": sum(m["size"] for m in ppt["media"].values()),
-                "n_slide_figs": n_figs,
-            })
         elif fmt == "pdf":
             from heures_supp.core.extract import pdf as extract_pdf
 
             pdf = extract_pdf.extract_pdf(data)
-            out.update({
-                "n_pages": pdf["n_pages"],
-                "total_chars": pdf["total_chars"],
-                "scanned": int(pdf["scanned"]),
-                "n_tables": sum(len(p["tables"]) for p in pdf["pages"]),
-                "n_images": len(pdf["images"]),
-            })
+            out.update(
+                {
+                    "n_pages": pdf["n_pages"],
+                    "total_chars": pdf["total_chars"],
+                    "scanned": int(pdf["scanned"]),
+                    "n_tables": sum(len(p["tables"]) for p in pdf["pages"]),
+                    "n_images": len(pdf["images"]),
+                }
+            )
         elif fmt in ("rtf", "html"):
             out["n_paras"] = len(data) // 100  # indicative only
     except Exception as e:
@@ -107,8 +108,9 @@ def deep_profile(row) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(description="Step 1: subset profiling")
-    parser.add_argument("--sample", type=int, default=300,
-                        help="Sample size for the full profiling (default 300)")
+    parser.add_argument(
+        "--sample", type=int, default=300, help="Sample size for the full profiling (default 300)"
+    )
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -138,9 +140,7 @@ def main():
         [sample[["cid", "docx_path", "format"]].reset_index(drop=True), ddf], axis=1
     )
 
-    out = pd.concat(
-        [df, df_sample.drop(columns=["cid", "docx_path", "format", "exists"])], axis=1
-    )
+    out = pd.concat([df, df_sample.drop(columns=["cid", "docx_path", "format", "exists"])], axis=1)
     ok = utils.put_parquet(out, config.PROFILE_FILE)
     if not ok:
         raise SystemExit(f"Could not write: {config.PROFILE_FILE}")

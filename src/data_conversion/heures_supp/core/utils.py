@@ -1,7 +1,10 @@
 """
-Shared helpers: safe S3 writes, format sniffing, downloads, error handling,
-LLM OCR of a single image, perceptual hashing.
+Shared helpers of the heures_supp pipeline.
+
+Safe S3 writes, format sniffing, downloads, error handling, LLM OCR of a
+single image, perceptual hashing.
 """
+
 import base64
 import io
 import json
@@ -17,10 +20,10 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------- S3 safety
 def safe_remote_path(path: str) -> str:
-    """Refuse any path outside the authorized output zone."""
-    if not path.startswith(config.OUTPUT_ROOT):
+    """Refuse any path outside the authorized write zones."""
+    if not (path.startswith(config.OUTPUT_ROOT) or path.startswith(config.TESTS_ROOT)):
         raise PermissionError(
-            f"refusing write outside {config.OUTPUT_ROOT!r}: {path!r}"
+            f"refusing write outside {config.OUTPUT_ROOT!r} or {config.TESTS_ROOT!r}: {path!r}"
         )
     return path
 
@@ -34,7 +37,7 @@ def s3_write_with_retry(write_fn, description: str, *args, **kwargs) -> bool:
             return True
         except Exception as e:
             last_exc = e
-            wait = config.S3_WRITE_RETRY_BASE_DELAY * (2 ** attempt)
+            wait = config.S3_WRITE_RETRY_BASE_DELAY * (2**attempt)
             logger.warning(
                 f"S3 write failed ({description}), attempt "
                 f"{attempt + 1}/{config.S3_WRITE_RETRIES}: {e}. Retrying in {wait}s."
@@ -90,12 +93,12 @@ def write_jsonl(path: str, records: list) -> bool:
 
 # ------------------------------------------------------------- format sniff
 def _zip_kind(data: bytes) -> str:
-    """
+    r"""
     docx/pptx/xlsx from the first bytes of a zip only.
 
     Constraint: zipfile needs the central directory (end of archive), so it
     cannot work on a truncated head. Trick: the NAMES of the local file
-    headers are stored in clear in the zip stream. We scan the PK\\x03\\x04
+    headers are stored in clear in the zip stream. We scan the PK\x03\x04
     signatures and read the names that follow; OOXML parts appear very early
     (word/*, ppt/*) right after [Content_Types].xml and _rels/.rels. Returns
     "zip" when no characteristic name is visible.
@@ -142,6 +145,7 @@ def _zip_kind(data: bytes) -> str:
 def sniff_format(data: bytes) -> str:
     """
     Detect the real format of a document from its magic bytes.
+
     The file extension is NEVER trusted (scrap_texts.py forces .docx).
     Returns one of: docx, pptx, xlsx, pdf, rtf, html, zip, unknown.
     """
@@ -180,8 +184,7 @@ def download_bytes(remote_path: str, max_retries: int = 3) -> bytes | None:
             return config.fs.cat_file(remote_path)
         except Exception as e:
             logger.warning(
-                f"Download failed {remote_path} "
-                f"(attempt {attempt + 1}/{max_retries}): {e}"
+                f"Download failed {remote_path} (attempt {attempt + 1}/{max_retries}): {e}"
             )
             time.sleep(2 * (attempt + 1))
     return None
@@ -228,20 +231,20 @@ def get_llm_client():
     from openai import OpenAI
 
     if not config.LLM_API_URL or not config.LLM_API_KEY:
-        raise RuntimeError(
-            "LLM_API_URL/LLM_API_KEY (or OPENAI_BASE_URL/OPENAI_API_KEY) not set."
-        )
+        raise RuntimeError("LLM_API_URL/LLM_API_KEY (or OPENAI_BASE_URL/OPENAI_API_KEY) not set.")
     if _llm_client is None:
         _llm_client = OpenAI(base_url=config.LLM_API_URL, api_key=config.LLM_API_KEY)
     return _llm_client
 
 
-def llm_ocr_image(image_bytes: bytes, mime: str, model: str | None = None,
-                  max_attempts: int = 3) -> str:
+def llm_ocr_image(
+    image_bytes: bytes, mime: str, model: str | None = None, max_attempts: int = 3
+) -> str:
     """
-    A single OCR/description call for one image (OpenAI-compatible endpoint).
-    Internal retry on transient errors (network, 5xx); raises the last error
-    after max_attempts attempts.
+    Run one OCR/description call for a single image.
+
+    Uses an OpenAI-compatible endpoint. Internal retry on transient errors
+    (network, 5xx); raises the last error after max_attempts attempts.
     """
     client = get_llm_client()
     b64 = base64.b64encode(image_bytes).decode()
@@ -270,8 +273,7 @@ def llm_ocr_image(image_bytes: bytes, mime: str, model: str | None = None,
             last_err = e
             wait = 5 * (attempt + 1)
             logger.warning(
-                f"OCR LLM attempt {attempt + 1}/{max_attempts} failed: {e} "
-                f"-> retrying in {wait}s"
+                f"OCR LLM attempt {attempt + 1}/{max_attempts} failed: {e} -> retrying in {wait}s"
             )
             time.sleep(wait)
     raise last_err
@@ -290,7 +292,8 @@ _RE_FAKE_LINK = re.compile(
 
 def clean_ocr_md(md: str) -> str:
     """
-    Deterministic cleaning of the Markdown produced by the VLM:
+    Clean the Markdown produced by the VLM, deterministically.
+
     - image references `![alt](url)` (the model renders logos with invented
       URLs) -> quote `> [Image : alt]` without URL;
     - lines containing only a URL: removed (URLs in the middle of text are
@@ -304,17 +307,19 @@ def clean_ocr_md(md: str) -> str:
         lambda m: f"> [Image : {m.group(1).strip()}]" if m.group(1).strip() else "> [Image]",
         md,
     )
-    md = _RE_FAKE_LINK.sub(lambda m: m.group(1).strip() or "[lien]", md)
+    md = _RE_FAKE_LINK.sub(lambda m: m.group(1).strip() or "[link]", md)
     lines = [ln for ln in md.splitlines() if not _RE_URL_ONLY_LINE.match(ln)]
     return "\n".join(lines).strip()
 
 
 def prepare_image_for_ocr(data: bytes, ext: str) -> tuple[bytes, str]:
     """
-    Deterministic image preparation before sending to the VLM:
+    Prepare an image deterministically before sending it to the VLM.
+
     - resizes very large images (VLMs cap image size),
     - re-encodes (JPEG q85 / PNG) to stay under a few MB,
     - flattens transparency onto a white background.
+
     Returns (bytes, mime); on error, returns the original image.
     """
     mime = MIME_BY_EXT.get(ext)

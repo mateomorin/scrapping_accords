@@ -10,6 +10,7 @@ Reads the step 2 shards and data/ocr_results.jsonl, then writes:
 Run:
     uv run src/data_conversion/heures_supp/steps/step4_finalize.py
 """
+
 import json
 import logging
 import os
@@ -56,13 +57,14 @@ def final_shard_path(idx: int) -> str:
 
 def list_shards() -> list:
     files = [
-        f for f in config.fs.ls(config.DATA_PATH, detail=False)
+        f
+        for f in config.fs.ls(config.DATA_PATH, detail=False)
         if "/shard_" in f and f.endswith(".parquet") and "final_shard" not in f
     ]
     idxs = []
     for f in files:
         try:
-            idxs.append(int(f.split("/")[-1][len("shard_"):-len(".parquet")]))
+            idxs.append(int(f.split("/")[-1][len("shard_") : -len(".parquet")]))
         except ValueError:
             continue
     return sorted(idxs)
@@ -87,39 +89,53 @@ def build_chunks(rec: dict) -> list:
         "format": rec.get("format"),
     }
     if rec.get("toc"):
-        chunks.append({
-            **base, "chunk_id": f"{cid}:TOC", "chunk_type": "toc",
-            "toc_md": toc_md(rec),
-        })
+        chunks.append(
+            {
+                **base,
+                "chunk_id": f"{cid}:TOC",
+                "chunk_type": "toc",
+                "toc_md": toc_md(rec),
+            }
+        )
     if (rec.get("preamble_md") or "").strip():
-        chunks.append({
-            **base, "chunk_id": f"{cid}:PREAMBLE", "chunk_type": "preamble",
-            "body_md": rec["preamble_md"],
-            "table_ids": rec.get("preamble_table_ids", []),
-            "figure_ids": rec.get("preamble_figure_ids", []),
-            "n_chars": len(rec["preamble_md"]),
-        })
+        chunks.append(
+            {
+                **base,
+                "chunk_id": f"{cid}:PREAMBLE",
+                "chunk_type": "preamble",
+                "body_md": rec["preamble_md"],
+                "table_ids": rec.get("preamble_table_ids", []),
+                "figure_ids": rec.get("preamble_figure_ids", []),
+                "n_chars": len(rec["preamble_md"]),
+            }
+        )
     for s in rec.get("sections", []):
-        chunks.append({
-            **base,
-            "chunk_id": f"{cid}:{s['id']}",
-            "chunk_type": "section",
-            "section_id": s["id"],
-            "level": s["level"],
-            "number": s.get("number"),
-            "title": s["title"],
-            "confidence": s.get("confidence"),
-            "parent": s.get("parent"),
-            "body_md": s.get("body_md", ""),
-            "table_ids": s.get("table_ids", []),
-            "figure_ids": s.get("figure_ids", []),
-            "n_chars": len(s.get("body_md", "")),
-        })
+        chunks.append(
+            {
+                **base,
+                "chunk_id": f"{cid}:{s['id']}",
+                "chunk_type": "section",
+                "section_id": s["id"],
+                "level": s["level"],
+                "number": s.get("number"),
+                "title": s["title"],
+                "confidence": s.get("confidence"),
+                "parent": s.get("parent"),
+                "body_md": s.get("body_md", ""),
+                "table_ids": s.get("table_ids", []),
+                "figure_ids": s.get("figure_ids", []),
+                "n_chars": len(s.get("body_md", "")),
+            }
+        )
     if (rec.get("signature_md") or "").strip():
-        chunks.append({
-            **base, "chunk_id": f"{cid}:SIGNATURE", "chunk_type": "signature",
-            "body_md": rec["signature_md"],
-        })
+        chunks.append(
+            {
+                **base,
+                "chunk_id": f"{cid}:SIGNATURE",
+                "chunk_type": "signature",
+                "body_md": rec["signature_md"],
+            }
+        )
     return chunks
 
 
@@ -138,22 +154,24 @@ def build_tables(rec: dict) -> list:
         grid = t.get("grid") or []
         if grid and any((c or "").strip() for c in grid[0]):
             header = grid[0]
-        out.append({
-            "table_id": f"{rec['cid']}:{t['id']}",
-            "cid": rec["cid"],
-            "reference": rec.get("reference"),
-            "section_id": sec,
-            "section_title": sec_title,
-            "context": t.get("context", ""),
-            "n_rows": t.get("n_rows"),
-            "n_cols": t.get("n_cols"),
-            "empty": t.get("empty", False),
-            "header": header,
-            "rows": grid,
-            "spans": t.get("spans"),
-            "vmerge": t.get("vmerge"),
-            "md": t.get("md", ""),
-        })
+        out.append(
+            {
+                "table_id": f"{rec['cid']}:{t['id']}",
+                "cid": rec["cid"],
+                "reference": rec.get("reference"),
+                "section_id": sec,
+                "section_title": sec_title,
+                "context": t.get("context", ""),
+                "n_rows": t.get("n_rows"),
+                "n_cols": t.get("n_cols"),
+                "empty": t.get("empty", False),
+                "header": header,
+                "rows": grid,
+                "spans": t.get("spans"),
+                "vmerge": t.get("vmerge"),
+                "md": t.get("md", ""),
+            }
+        )
     return out
 
 
@@ -174,8 +192,7 @@ def main():
     all_tables = []
 
     for idx in shards:
-        df = pd.read_parquet(f"{config.DATA_PATH}shard_{idx:05d}.parquet",
-                             filesystem=config.fs)
+        df = pd.read_parquet(f"{config.DATA_PATH}shard_{idx:05d}.parquet", filesystem=config.fs)
         final_rows = []
         for _, row in df.iterrows():
             try:
@@ -212,21 +229,23 @@ def main():
                     if ok:
                         ocr_ok += 1
             rec["n_ocr_ok"] = n_ocr_ok
-            final_rows.append({
-                "cid": row["cid"],
-                "reference": row.get("reference"),
-                "dateSignature": row.get("dateSignature"),
-                "doc_type": rec.get("doc_type"),
-                "format": rec.get("format"),
-                "n_sections": rec.get("n_sections"),
-                "n_tables": rec.get("n_tables"),
-                "n_figures": rec.get("n_figures"),
-                "n_ocr_kept": rec.get("n_ocr_kept"),
-                "n_ocr_dropped": rec.get("n_ocr_dropped"),
-                "n_ocr_ok": n_ocr_ok,
-                "error": row.get("error"),
-                "doc_json": json.dumps(rec, ensure_ascii=False),
-            })
+            final_rows.append(
+                {
+                    "cid": row["cid"],
+                    "reference": row.get("reference"),
+                    "dateSignature": row.get("dateSignature"),
+                    "doc_type": rec.get("doc_type"),
+                    "format": rec.get("format"),
+                    "n_sections": rec.get("n_sections"),
+                    "n_tables": rec.get("n_tables"),
+                    "n_figures": rec.get("n_figures"),
+                    "n_ocr_kept": rec.get("n_ocr_kept"),
+                    "n_ocr_dropped": rec.get("n_ocr_dropped"),
+                    "n_ocr_ok": n_ocr_ok,
+                    "error": row.get("error"),
+                    "doc_json": json.dumps(rec, ensure_ascii=False),
+                }
+            )
             n_docs += 1
             fmt_counts[rec.get("format")] += 1
             type_counts[rec.get("doc_type")] += 1
@@ -261,7 +280,9 @@ def main():
             "tables": TABLES_FILE,
         },
     }
-    if not utils.put_bytes(SUMMARY_FILE, json.dumps(summary, ensure_ascii=False, indent=2).encode()):
+    if not utils.put_bytes(
+        SUMMARY_FILE, json.dumps(summary, ensure_ascii=False, indent=2).encode()
+    ):
         raise RuntimeError(f"Could not write: {SUMMARY_FILE}")
 
     logger.info(json.dumps(summary, ensure_ascii=False, indent=2))

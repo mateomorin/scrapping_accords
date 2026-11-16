@@ -1,39 +1,31 @@
+"""Download ACCO documents from the LegiFrance API and export them to S3."""
+
 import argparse
 import asyncio
 import base64
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import boto3
-from botocore.config import Config
+import config
 import httpx
 import pandas as pd
+from botocore.config import Config
+from legifrance_api_client import AsyncLegiFranceClient
 from tqdm.asyncio import tqdm_asyncio
 
-import config
-from legifrance_api_client import AsyncLegiFranceClient
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
-boto3_config = Config(
-        max_pool_connections=50,
-        retries={'max_attempts': 3, 'mode': 'standard'}
-    )
+boto3_config = Config(max_pool_connections=50, retries={"max_attempts": 3, "mode": "standard"})
 boto_client = boto3.client(
-    "s3",
-    endpoint_url="https://minio.lab.sspcloud.fr",
-    region_name="us-east-1",
-    config=boto3_config
+    "s3", endpoint_url="https://minio.lab.sspcloud.fr", region_name="us-east-1", config=boto3_config
 )
 
 # Change year/month before running exports
-context_vars = {
-    "year": "YYYY",
-    "month": "MM"
-}
+context_vars = {"year": "YYYY", "month": "MM"}
 
 
 def parse_months(value):
@@ -44,7 +36,7 @@ def parse_months(value):
         return "all"
 
     try:
-        months = [int(m.strip()) for m in value.replace(',', ' ').split()]
+        months = [int(m.strip()) for m in value.replace(",", " ").split()]
         for m in months:
             if not 1 <= m <= 12:
                 raise argparse.ArgumentTypeError(f"Month {m} must be set between 1 and 12.")
@@ -69,9 +61,11 @@ def parse_year(value):
 
 def retrieve_table_url(year: int, month: int):
     """
-    Either the file is in format 'acco_metadata_YYYY.parquet' if it contains every month of the year.
-    Or it is in format 'acco_metadata_YYYY_MM_MM_MM.parquet', each 'MM' standing for a particular month.
-    'MM' can also be 'M' if the month is < 10.
+    Find the metadata parquet for a year/month (full-year or monthly file).
+
+    The file is 'acco_metadata_YYYY.parquet' when it contains every month of
+    the year, or 'acco_metadata_YYYY_MM_MM_MM.parquet', each 'MM' standing
+    for a particular month ('MM' can be 'M' if the month is < 10).
     """
     existing_files = config.fs.ls(config.METADATA_PATH)
 
@@ -101,7 +95,7 @@ def retrieve_ids(year: int, month: int):
     # Find url
     path_to_table = config.METADATA_PATH + retrieve_table_url(year, month)
 
-    # Treat data 
+    # Treat data
     df_table = pd.read_parquet(path_to_table, filesystem=config.fs)
     df_table["dateSignature"] = pd.to_datetime(df_table["dateSignature"])
 
@@ -112,7 +106,8 @@ def retrieve_ids(year: int, month: int):
 
 async def download_doc_with_retry(client, payload, semaphore):
     """
-    Trying to download an acco for a specific payload, with retries.
+    Download one ACCO document for a payload, with retries.
+
     401 errors often happen for some filters, so this allows multiple tries.
     Waiting time grows exponentially with each retry.
     """
@@ -126,7 +121,12 @@ async def download_doc_with_retry(client, payload, semaphore):
 
                 # In case of unexpected status code
                 if response.status_code == 200:
-                    return response.json()["acco"]["data"], attempt, status_code_errors, request_errors
+                    return (
+                        response.json()["acco"]["data"],
+                        attempt,
+                        status_code_errors,
+                        request_errors,
+                    )
                 else:
                     status_code_errors += 1
                     await asyncio.sleep(2 * (attempt + 1))
@@ -190,13 +190,14 @@ def download_doc_by_month(year: int, month: int):
 
 def upload_single_document(item):
     """
-    Upload a document to s3 in format docx.
-    The item should contain keys:
-        - id: cid of the document (unique)
-        - content_b64: binary data of the document in format base64
+    Upload one document to S3 as a .docx file.
+
+    The item must contain the keys:
+    - id: cid of the document (unique)
+    - content_b64: binary data of the document in base64
     """
-    doc_id = item['id']
-    content_b64 = item['content_b64']
+    doc_id = item["id"]
+    content_b64 = item["content_b64"]
 
     try:
         # Decode
@@ -210,7 +211,7 @@ def upload_single_document(item):
             Bucket=bucket_name,
             Key=f"{directory}{context_vars['year']}/{context_vars['month']}/{doc_id}.docx",
             Body=binary_data,
-            ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         )
         return doc_id, True, None
 
@@ -236,18 +237,14 @@ def upload_batch_to_s3(documents, max_workers=30):
                 results["failed"] += 1
                 results["errors"].append((doc_id, err))
 
-    logger.info(f"{results['success']} documents uploaded! | "
-                f"{results['failed']} fails")
+    logger.info(f"{results['success']} documents uploaded! | {results['failed']} fails")
 
-    if results['failed'] >= 1:
+    if results["failed"] >= 1:
         logger.info(f"Errors: \n{'\n'.join(results['errors'])}")
 
 
 def scrap_all_acco():
-    """
-    Scrap all ACCO documents from 2017/09/01 (ACCO creation) to 2025/12/31.
-    """
-
+    """Scrape all ACCO documents from 2017/09/01 (ACCO creation) to 2025/12/31."""
     logger.info("=========================== YEAR 2017 ============================")
     context_vars["year"] = 2017
     for month in range(9, 13):
@@ -283,22 +280,15 @@ def scrap_specific_months(year, months):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Scrapping of ACCO by month and year"
-    )
+    parser = argparse.ArgumentParser(description="Scrapping of ACCO by month and year")
 
-    parser.add_argument(
-        "--year",
-        type=parse_year,
-        required=True,
-        help="Specific year or 'all'"
-    )
+    parser.add_argument("--year", type=parse_year, required=True, help="Specific year or 'all'")
 
     parser.add_argument(
         "--month",
         type=parse_months,
         default="all",
-        help="Month list (ex: '1,2,3' ou '1 2 3') or 'all' (default: 'all')"
+        help="Month list (ex: '1,2,3' or '1 2 3') or 'all' (default: 'all')",
     )
 
     args = parser.parse_args()

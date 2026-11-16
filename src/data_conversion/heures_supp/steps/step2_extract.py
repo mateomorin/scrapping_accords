@@ -16,6 +16,7 @@ Run:
     uv run src/data_conversion/heures_supp/steps/step2_extract.py --limit 30   # quick test
     uv run src/data_conversion/heures_supp/steps/step2_extract.py --force      # reprocess complete shards
 """
+
 import argparse
 import logging
 import os
@@ -40,7 +41,8 @@ logging.getLogger("s3fs").setLevel(logging.WARNING)
 
 def existing_shards() -> dict:
     """
-    idx -> row count of the already-written shards.
+    Map shard index to row count for the already-written shards.
+
     A shard is considered COMPLETE (and therefore final) only if it contains
     SHARD_SIZE rows; a partial shard (--limit test, crash mid-write) is
     reprocessed on the next run.
@@ -55,7 +57,7 @@ def existing_shards() -> dict:
         name = f.split("/")[-1]
         if name.startswith("shard_") and name.endswith(".parquet"):
             try:
-                idx = int(name[len("shard_"):-len(".parquet")])
+                idx = int(name[len("shard_") : -len(".parquet")])
             except ValueError:
                 continue
             try:
@@ -81,18 +83,26 @@ def process_one(row, figs_base: str) -> dict:
     data = utils.download_bytes(row["docx_path"])
     if data is None:
         return {
-            "cid": cid, "reference": row.get("reference"),
+            "cid": cid,
+            "reference": row.get("reference"),
             "dateSignature": str(row.get("dateSignature")),
-            "doc_type": "missing", "format": "missing",
-            "n_sections": 0, "n_tables": 0, "n_figures": 0,
-            "n_ocr_kept": 0, "n_ocr_dropped": 0,
+            "doc_type": "missing",
+            "format": "missing",
+            "n_sections": 0,
+            "n_tables": 0,
+            "n_figures": 0,
+            "n_ocr_kept": 0,
+            "n_ocr_dropped": 0,
             "error": "file missing or download failed",
             "doc_json": record_to_json({"cid": cid, "errors": ["missing file"]}),
         }
     try:
         rec = process_document_bytes(
-            data, cid, row.get("reference"),
-            upload_figure=upload_figure, figs_base=figs_base,
+            data,
+            cid,
+            row.get("reference"),
+            upload_figure=upload_figure,
+            figs_base=figs_base,
         )
         return {
             "cid": cid,
@@ -113,11 +123,16 @@ def process_one(row, figs_base: str) -> dict:
 
         logger.error(f"Unexpected failure on {cid}: {e}\n{traceback.format_exc()}")
         return {
-            "cid": cid, "reference": row.get("reference"),
+            "cid": cid,
+            "reference": row.get("reference"),
             "dateSignature": str(row.get("dateSignature")),
-            "doc_type": "error", "format": "unknown",
-            "n_sections": 0, "n_tables": 0, "n_figures": 0,
-            "n_ocr_kept": 0, "n_ocr_dropped": 0,
+            "doc_type": "error",
+            "format": "unknown",
+            "n_sections": 0,
+            "n_tables": 0,
+            "n_figures": 0,
+            "n_ocr_kept": 0,
+            "n_ocr_dropped": 0,
             "error": f"{type(e).__name__}: {e}",
             "doc_json": record_to_json({"cid": cid, "errors": [str(e)]}),
         }
@@ -130,8 +145,7 @@ def process_shard(rows: pd.DataFrame, shard_idx: int, use_threads: bool) -> None
     if use_threads and len(rows) > 1:
         with ThreadPoolExecutor(max_workers=config.MAX_CONCURRENCY_DOWNLOAD) as ex:
             futs = {
-                ex.submit(process_one, row.to_dict(), figs_base): i
-                for i, row in rows.iterrows()
+                ex.submit(process_one, row.to_dict(), figs_base): i for i, row in rows.iterrows()
             }
             for fut in tqdm(as_completed(futs), total=len(futs), desc=f"shard {shard_idx:05d}"):
                 records[futs[fut]] = fut.result()
@@ -145,24 +159,23 @@ def process_shard(rows: pd.DataFrame, shard_idx: int, use_threads: bool) -> None
     ok = utils.put_parquet(df, shard_output_path(shard_idx))
     if not ok:
         raise RuntimeError(
-            f"Could not write shard {shard_idx} to S3 after "
-            f"{config.S3_WRITE_RETRIES} attempts."
+            f"Could not write shard {shard_idx} to S3 after {config.S3_WRITE_RETRIES} attempts."
         )
     n_err = int(df["error"].notna().sum())
-    logger.info(
-        f"Shard {shard_idx:05d} saved ({len(df)} documents, {n_err} with errors)."
-    )
+    logger.info(f"Shard {shard_idx:05d} saved ({len(df)} documents, {n_err} with errors).")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Step 2: structure extraction")
-    parser.add_argument("--limit", type=int, default=0,
-                        help="Process only the first N documents (0 = all)")
-    parser.add_argument("--sequential", action="store_true",
-                        help="Disable parallelism (debug)")
-    parser.add_argument("--force", action="store_true",
-                        help="Reprocess complete shards (e.g. after a change to "
-                             "structure detection)")
+    parser.add_argument(
+        "--limit", type=int, default=0, help="Process only the first N documents (0 = all)"
+    )
+    parser.add_argument("--sequential", action="store_true", help="Disable parallelism (debug)")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Reprocess complete shards (e.g. after a change to structure detection)",
+    )
     args = parser.parse_args()
 
     sel = pd.read_parquet(config.SELECTION_FILE, filesystem=config.fs)
@@ -183,7 +196,9 @@ def main():
         if done.get(shard_idx, 0) >= expected:
             logger.info(f"Shard {shard_idx:05d} complete on S3 -> skipped (resume).")
             continue
-        rows = sel.iloc[shard_idx * config.SHARD_SIZE:(shard_idx + 1) * config.SHARD_SIZE].reset_index(drop=True)
+        rows = sel.iloc[
+            shard_idx * config.SHARD_SIZE : (shard_idx + 1) * config.SHARD_SIZE
+        ].reset_index(drop=True)
         t0 = time.time()
         process_shard(rows, shard_idx, use_threads)
         dt = time.time() - t0
@@ -194,8 +209,7 @@ def main():
         total_err += int(df["error"].notna().sum())
 
     logger.info(
-        f"Step 2 done: {total_ok} documents OK, {total_err} with errors, "
-        f"shards written to {config.DATA_PATH}"
+        f"Step 2 done: {total_ok} documents OK, {total_err} with errors, shards written to {config.DATA_PATH}"
     )
 
 

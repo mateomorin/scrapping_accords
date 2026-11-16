@@ -16,6 +16,7 @@ Run:
     uv run src/data_conversion/heures_supp/steps/step3_ocr.py --max-images 20
     uv run src/data_conversion/heures_supp/steps/step3_ocr.py --ocr-scanned
 """
+
 import argparse
 import json
 import logging
@@ -52,9 +53,9 @@ def collect_queue(ocr_scanned: bool) -> list:
     items = []
     try:
         shard_files = [
-            f for f in config.fs.ls(config.DATA_PATH, detail=False)
-            if "/shard_" in f and f.endswith(".parquet")
-            and "final_shard" not in f
+            f
+            for f in config.fs.ls(config.DATA_PATH, detail=False)
+            if "/shard_" in f and f.endswith(".parquet") and "final_shard" not in f
         ]
     except (FileNotFoundError, IsADirectoryError):
         logger.error(f"No shards found in {config.DATA_PATH} (run step 2 first).")
@@ -71,39 +72,47 @@ def collect_queue(ocr_scanned: bool) -> list:
             for fig in rec.get("figures", []):
                 tri = fig.get("triage", {})
                 if tri.get("keep") and fig.get("fig_s3"):
-                    items.append({
-                        "fig_ref": f"{cid}:{fig['id']}",
-                        "cid": cid,
-                        "fig_id": fig["id"],
-                        "fig_s3": fig["fig_s3"],
-                        "fmt": (fig.get("fmt") or "").lower(),
-                        "kind": "image",
-                    })
+                    items.append(
+                        {
+                            "fig_ref": f"{cid}:{fig['id']}",
+                            "cid": cid,
+                            "fig_id": fig["id"],
+                            "fig_s3": fig["fig_s3"],
+                            "fmt": (fig.get("fmt") or "").lower(),
+                            "kind": "image",
+                        }
+                    )
             if ocr_scanned and rec.get("doc_type") == "pdf_scanned":
-                items.append({
-                    "fig_ref": f"{cid}:FULL",
-                    "cid": cid,
-                    "fig_id": "FULL",
-                    "fig_s3": None,
-                    "fmt": "pdf",
-                    "kind": "pdf_scanned",
-                })
+                items.append(
+                    {
+                        "fig_ref": f"{cid}:FULL",
+                        "cid": cid,
+                        "fig_id": "FULL",
+                        "fig_s3": None,
+                        "fmt": "pdf",
+                        "kind": "pdf_scanned",
+                    }
+                )
     return items
 
 
 def done_refs() -> set:
     """
-    fig_refs processed successfully. Failures (transient or permanent) are
-    NOT marked as done: a re-run of step 3 retries the failures (permanent
-    failures like EMF without a rasterizer are cheap).
+    Collect the fig_refs processed successfully so far.
+
+    Failures (transient or permanent) are NOT marked as done: a re-run of
+    step 3 retries the failures (permanent failures like EMF without a
+    rasterizer are cheap).
     """
     return {r["fig_ref"] for r in utils.read_jsonl(OCR_RESULTS_FILE) if r.get("ok")}
 
 
 def rasterize_vector(data: bytes, ext: str):
     """
-    Try to rasterize an EMF/WMF via ImageMagick. Returns (bytes, mime) or
-    None if impossible (the caller then marks a skip).
+    Try to rasterize an EMF/WMF image via ImageMagick.
+
+    Returns (bytes, mime), or None if impossible (the caller then marks a
+    skip).
     """
     bin_ = shutil.which("magick") or shutil.which("convert")
     if not bin_:
@@ -116,7 +125,9 @@ def rasterize_vector(data: bytes, ext: str):
         try:
             subprocess.run(
                 [bin_, src, "-density", "150", f"{dst}.png"],
-                check=True, capture_output=True, timeout=240,
+                check=True,
+                capture_output=True,
+                timeout=240,
             )
         except Exception:
             return None
@@ -129,8 +140,9 @@ def rasterize_vector(data: bytes, ext: str):
 
 def ocr_pdf_scanned(docx_path: str) -> str:
     """
-    Full OCR of a scanned PDF via the Docling VLM pipeline (same settings
-    as the old conversion chain).
+    Run full OCR on a scanned PDF via the Docling VLM pipeline.
+
+    Uses the same settings as the old conversion chain.
     """
     from docling.datamodel.base_models import InputFormat
     from docling.datamodel.pipeline_options import VlmConvertOptions, VlmPipelineOptions
@@ -150,9 +162,7 @@ def ocr_pdf_scanned(docx_path: str) -> str:
         timeout=config.OCR_TIMEOUT,
         concurrency=2,
     )
-    vlm_options = VlmConvertOptions.from_preset(
-        "gemma_27b", engine_options=engine_options
-    )
+    vlm_options = VlmConvertOptions.from_preset("gemma_27b", engine_options=engine_options)
     pipeline_options = VlmPipelineOptions(vlm_options=vlm_options, enable_remote_services=True)
     converter = DocumentConverter(
         format_options={
@@ -179,43 +189,81 @@ def ocr_one(item: dict, doc_paths: dict) -> dict:
     try:
         if item["kind"] == "pdf_scanned":
             md = utils.clean_ocr_md(ocr_pdf_scanned(doc_paths[item["cid"]]))
-            return {**base, "ocr_md": md, "model": config.LLM_MODEL,
-                    "ok": True, "error": None, "ts": ts}
+            return {
+                **base,
+                "ocr_md": md,
+                "model": config.LLM_MODEL,
+                "ok": True,
+                "error": None,
+                "ts": ts,
+            }
 
         data = utils.download_bytes(item["fig_s3"])
         if data is None:
-            return {**base, "ocr_md": None, "model": None,
-                    "ok": False, "error": "image_download_failed", "ts": ts}
+            return {
+                **base,
+                "ocr_md": None,
+                "model": None,
+                "ok": False,
+                "error": "image_download_failed",
+                "ts": ts,
+            }
 
         ext = item["fmt"]
         if ext in ("emf", "wmf"):
             r = rasterize_vector(data, ext)
             if r is None:
-                return {**base, "ocr_md": None, "model": None,
-                        "ok": False, "error": "emf_wmf_rasterizer_unavailable", "ts": ts}
+                return {
+                    **base,
+                    "ocr_md": None,
+                    "model": None,
+                    "ok": False,
+                    "error": "emf_wmf_rasterizer_unavailable",
+                    "ts": ts,
+                }
             data, mime = r
         elif ext in MIME_BY_EXT:
             mime = MIME_BY_EXT[ext]
         else:
-            return {**base, "ocr_md": None, "model": None,
-                    "ok": False, "error": f"image_format_not_ocrable:{ext}", "ts": ts}
+            return {
+                **base,
+                "ocr_md": None,
+                "model": None,
+                "ok": False,
+                "error": f"image_format_not_ocrable:{ext}",
+                "ts": ts,
+            }
 
         # deterministic resize / re-encoding before sending to the VLM
         data, mime = utils.prepare_image_for_ocr(data, ext)
         md = utils.clean_ocr_md(utils.llm_ocr_image(data, mime))
-        return {**base, "ocr_md": md, "model": config.LLM_MODEL,
-                "ok": True, "error": None, "ts": ts}
+        return {
+            **base,
+            "ocr_md": md,
+            "model": config.LLM_MODEL,
+            "ok": True,
+            "error": None,
+            "ts": ts,
+        }
     except Exception as e:
-        return {**base, "ocr_md": None, "model": None,
-                "ok": False, "error": f"{type(e).__name__}: {e}", "ts": ts}
+        return {
+            **base,
+            "ocr_md": None,
+            "model": None,
+            "ok": False,
+            "error": f"{type(e).__name__}: {e}",
+            "ts": ts,
+        }
 
 
 def main():
     parser = argparse.ArgumentParser(description="Step 3: OCR of the kept images")
-    parser.add_argument("--max-images", type=int, default=0,
-                        help="Max number of OCR calls (0 = all)")
-    parser.add_argument("--ocr-scanned", action="store_true",
-                        help="Also process scanned PDFs via Docling (heavy)")
+    parser.add_argument(
+        "--max-images", type=int, default=0, help="Max number of OCR calls (0 = all)"
+    )
+    parser.add_argument(
+        "--ocr-scanned", action="store_true", help="Also process scanned PDFs via Docling (heavy)"
+    )
     args = parser.parse_args()
 
     # raw document paths (for the scanned PDFs)
@@ -229,8 +277,7 @@ def main():
         todo = todo[: args.max_images]
 
     logger.info(
-        f"OCR queue: {len(queue)} total, {len(done)} already done, "
-        f"{len(todo)} to process now."
+        f"OCR queue: {len(queue)} total, {len(done)} already done, {len(todo)} to process now."
     )
     if not todo:
         logger.info("Nothing to do.")

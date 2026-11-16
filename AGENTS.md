@@ -86,4 +86,4 @@ The S3 backend is **MinIO**, not AWS: endpoint `https://minio.lab.sspcloud.fr`, 
 
 ## 7. Git & Delivery
 
-- The agent must **not** `git commit` or `git push`. Version control is handled by the user: the agent leaves changes in the working tree for the user to review and commit.
+- You must **not** `git commit` or `git push`. Version control is handled by the user: you leave changes in the working tree for the user to review and commit.

@@ -13,6 +13,7 @@ Run:
     uv run src/data_conversion/heures_supp/steps/step5_validate.py --limit 3
     uv run src/data_conversion/heures_supp/steps/step5_validate.py --limit 5 --compare
 """
+
 import argparse
 import json
 import logging
@@ -70,7 +71,8 @@ def overlap_f1(a: str, b: str) -> float:
 
 def load_existing_markdown(cids: set, cid_year: dict | None = None) -> dict:
     """
-    cid -> markdown of the old conversion (read-only).
+    Map cid to the markdown of the old conversion (read-only).
+
     The old chain wrote one directory per metadata batch
     (full_data/data/acco_data_{YEAR}/shard_*.parquet): first the directories
     matching the signature year of the sampled cids are read, then the rest
@@ -110,7 +112,8 @@ def load_existing_markdown(cids: set, cid_year: dict | None = None) -> dict:
     if cid_year:
         years = {cid_year[c] for c in cids if c in cid_year and cid_year.get(c)}
         targeted = [
-            d for d in dirs
+            d
+            for d in dirs
             if any(d == f"acco_data_{y}" or d.startswith(f"acco_data_{y}_") for y in years)
         ]
         for d in targeted:
@@ -147,16 +150,16 @@ def report_doc(rec: dict, verbose: bool) -> dict:
         "n_figures": rec.get("n_figures"),
         "n_ocr_kept": rec.get("n_ocr_kept"),
         "errors": rec.get("errors", []),
-        "section_confidence": dict(Counter(
-            s.get("confidence") for s in rec.get("sections", [])
-        )),
-        "figure_reasons": dict(Counter(
-            f.get("triage", {}).get("reason") for f in rec.get("figures", [])
-        )),
+        "section_confidence": dict(Counter(s.get("confidence") for s in rec.get("sections", []))),
+        "figure_reasons": dict(
+            Counter(f.get("triage", {}).get("reason") for f in rec.get("figures", []))
+        ),
     }
-    print(f"\n{'=' * 90}\nDOC {rec.get('cid')}  [{rec.get('doc_type')}/{rec.get('format')}]  "
-          f"sections={rec.get('n_sections')} tables={rec.get('n_tables')} "
-          f"figures={rec.get('n_figures')} (kept={rec.get('n_ocr_kept')})")
+    print(
+        f"\n{'=' * 90}\nDOC {rec.get('cid')}  [{rec.get('doc_type')}/{rec.get('format')}]  "
+        f"sections={rec.get('n_sections')} tables={rec.get('n_tables')} "
+        f"figures={rec.get('n_figures')} (kept={rec.get('n_ocr_kept')})"
+    )
     for t in rec.get("toc", [])[:25]:
         indent = "  " * max(t["level"] - 1, 0)
         num = f"{t['number']} " if t.get("number") else ""
@@ -170,8 +173,10 @@ def report_doc(rec: dict, verbose: bool) -> dict:
     if verbose and rec.get("figures"):
         for f in rec["figures"][:6]:
             tr = f.get("triage", {})
-            print(f"  [fig {f['id']}] {f.get('fmt')} {f.get('size')}B "
-                  f"origin={f.get('origin')} keep={tr.get('keep')} ({tr.get('reason')})")
+            print(
+                f"  [fig {f['id']}] {f.get('fmt')} {f.get('size')}B "
+                f"origin={f.get('origin')} keep={tr.get('keep')} ({tr.get('reason')})"
+            )
     if rec.get("errors"):
         print(f"  ERRORS: {rec['errors'][:3]}")
     return out
@@ -180,8 +185,9 @@ def report_doc(rec: dict, verbose: bool) -> dict:
 def main():
     parser = argparse.ArgumentParser(description="Step 5: validation")
     parser.add_argument("--limit", type=int, default=3, help="Number of documents to display")
-    parser.add_argument("--compare", action="store_true",
-                        help="Compare with the old LLM output (full_data)")
+    parser.add_argument(
+        "--compare", action="store_true", help="Compare with the old LLM output (full_data)"
+    )
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -232,8 +238,9 @@ def main():
     ok = utils.put_bytes(REPORT_FILE, json.dumps(report, ensure_ascii=False, indent=2).encode())
     if ok:
         logger.info(f"Report written: {REPORT_FILE}")
-    logger.info(f"Summary: doc_types={report['doc_types']} formats={report['formats']} "
-                f"errors={report['n_with_error']}")
+    logger.info(
+        f"Summary: doc_types={report['doc_types']} formats={report['formats']} errors={report['n_with_error']}"
+    )
 
 
 if __name__ == "__main__":

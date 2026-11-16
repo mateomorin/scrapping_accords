@@ -14,17 +14,21 @@ Rules (in order):
   5. perceptual duplicate (png/jpg)   -> drop  (duplicate)
   6. otherwise                        -> keep  (inline / slide_content)
 """
+
 from . import config
 from .utils import perceptual_hash
 
 
 def triage_figure(fig: dict, block_pos: int, n_blocks: int, seen_hashes: set) -> tuple:
     """
-    fig      : {"part", "fmt", "size", "origin", "data": bytes|None}
-    block_pos: position of the figure block in the ordered block list
-    n_blocks : total number of blocks
-    seen_hashes: set of phash already seen (current run); updated here
-    Returns (keep: bool, reason: str)
+    Decide whether a figure is worth an OCR job.
+
+    fig: {"part", "fmt", "size", "origin", "data": bytes|None}.
+    block_pos: position of the figure block in the ordered block list.
+    n_blocks: total number of blocks.
+    seen_hashes: set of phash already seen (current run); updated here.
+
+    Returns (keep: bool, reason: str).
     """
     fmt = (fig.get("fmt") or "").lower()
     size = fig.get("size") or 0

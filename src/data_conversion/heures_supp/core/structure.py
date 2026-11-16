@@ -20,12 +20,11 @@ document contains at least one container title (TITRE / CHAPITRE / ...), so
 that articles attach one level below their container. Native format levels
 (Word outlineLvl, ODF text:outline-level) are used as-is, without offset.
 """
+
 import re
 from statistics import median
 
-RE_ARTICLE = re.compile(
-    r"^(?:Article|ARTICLE|art\.|Art\.)\s*(?:1er\b|\d+(?:\.\d{1,2}){0,4})"
-)
+RE_ARTICLE = re.compile(r"^(?:Article|ARTICLE|art\.|Art\.)\s*(?:1er\b|\d+(?:\.\d{1,2}){0,4})")
 # Decimal: "11.3.2.1" (dot chains allowed) or "1." / "2)" (a dot/parenthesis
 # is MANDATORY at level 1, to avoid dates like "17 Novembre 2017").
 RE_DECIMAL = re.compile(r"^(?P<num>\d{1,2}(?:\.\d{1,2}){0,4})(?P<sep>[.)]\s*|\s)\s*\S")
@@ -75,6 +74,8 @@ def _words(text: str) -> list:
 
 def score_paragraph(text: str, feat: dict) -> tuple:
     """
+    Score a paragraph for heading-ness.
+
     Returns (score, evidence, is_heading, kind, base, number, outline_lvl).
 
     kind  : "container" | "preamble" | "article" | "decimal" | "letter"
@@ -168,15 +169,20 @@ def score_paragraph(text: str, feat: dict) -> tuple:
     if u >= 0.8 and n <= 12:
         s += 1
         ev.append("underline-short")
-    if feat.get("size_pt") and feat.get("doc_median_pt") and feat["size_pt"] >= feat["doc_median_pt"] * 1.15:
+    if (
+        feat.get("size_pt")
+        and feat.get("doc_median_pt")
+        and feat["size_pt"] >= feat["doc_median_pt"] * 1.15
+    ):
         s += 1
         ev.append("size-large")
 
     # --- penalties ---
     if hard_veto:
         s -= 4
-        ev.append("boilerplate" if is_boiler
-                  else "placeholder" if is_placeholder else "toc-page-glued")
+        ev.append(
+            "boilerplate" if is_boiler else "placeholder" if is_placeholder else "toc-page-glued"
+        )
     if toc_like:
         s -= 3
         ev.append("toc-page-ref")
@@ -193,9 +199,8 @@ def score_paragraph(text: str, feat: dict) -> tuple:
         ev.append("sentence-end")
 
     strong_typo = caps_short and bold_short
-    is_heading = (
-        not hard_veto
-        and (s >= 3 or (s >= 1 and not toc_like and (has_numbering or strong_typo or "kw-section" in ev)))
+    is_heading = not hard_veto and (
+        s >= 3 or (s >= 1 and not toc_like and (has_numbering or strong_typo or "kw-section" in ev))
     )
 
     # --- family / depth ---
@@ -228,22 +233,22 @@ def score_paragraph(text: str, feat: dict) -> tuple:
 
 def compute_offset(scored: dict) -> int:
     """
-    Document-wide level offset: if the document contains at least one
-    accepted container title (TITRE / CHAPITRE / PARTIE / LIVRE /
-    EXPOSÉ DES MOTIFS / ANNEXE), articles (and their sub-hierarchy) are one
-    level lower: they belong to the container that precedes them. Otherwise
-    (no container in the document) offset = 0 and levels are identical to
-    the base rule.
+    Compute the document-wide level offset (0 or 1).
+
+    If the document contains at least one accepted container title (TITRE /
+    CHAPITRE / PARTIE / LIVRE / EXPOSÉ DES MOTIFS / ANNEXE), articles (and
+    their sub-hierarchy) are one level lower: they belong to the container
+    that precedes them. Otherwise (no container in the document) offset = 0
+    and levels are identical to the base rule.
     """
-    return 1 if any(
-        res[2] and res[3] == "container" for res in scored.values()
-    ) else 0
+    return 1 if any(res[2] and res[3] == "container" for res in scored.values()) else 0
 
 
 def find_signature_start(para_units: list) -> int | None:
     """
-    Index of the first 'Fait à ...' paragraph located after half the document
-    (signature zone). None if not found.
+    Find the start of the signature zone (first 'Fait à ...' after mid-document).
+
+    Returns the index of the paragraph, or None if not found.
     """
     n = len(para_units)
     for i in range(n // 2, n):
@@ -252,10 +257,11 @@ def find_signature_start(para_units: list) -> int | None:
     return None
 
 
-def build_structure(items: list, scored: dict, para_units: list,
-                    signature_start: int | None, offset: int = 0) -> dict:
+def build_structure(
+    items: list, scored: dict, para_units: list, signature_start: int | None, offset: int = 0
+) -> dict:
     """
-    Builds the section tree in a single pass over the document items.
+    Build the section tree in a single pass over the document items.
 
     items     : ordered list; each item:
                   {"kind": "para",   "idx": para_idx, "u": {"text","feat","src"}}
@@ -349,7 +355,9 @@ def build_structure(items: list, scored: dict, para_units: list,
             rattach = it.get("rattach")
             if in_signature(rattach):
                 it["sec_id"] = "signature"
-                (signature["table_ids"] if kind == "table" else signature["figure_ids"]).append(it["id"])
+                (signature["table_ids"] if kind == "table" else signature["figure_ids"]).append(
+                    it["id"]
+                )
             else:
                 cur = stack[-1] if stack else root
                 it["sec_id"] = cur["id"]
